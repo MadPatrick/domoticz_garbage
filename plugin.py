@@ -45,7 +45,7 @@
             </tr>
             <tr>
                 <td style="padding:3px 16px 3px 0;">reinis</td>
-                <td style="padding:3px 0;">optional: calendar link from reinis.nl/kalender (Toevoegen aan agenda &gt; Link kopi&#235;ren); leave empty for automatic lookup</td>
+                <td style="padding:3px 0;">calendar link from reinis.nl/kalender (Toevoegen aan agenda &gt; Link kopi&#235;ren)</td>
             </tr>
             <tr>
                 <td style="padding:3px 16px 3px 0;">mijnafvalwijzer / mijnafvalwijzer_api</td>
@@ -1497,8 +1497,9 @@ class ReinisModule(GarbageModule):
             url = ''
         if not url:
             self._error(
-                'Could not get the Reinis calendar link automatically. Open reinis.nl/kalender, '
-                'click "Toevoegen aan agenda" -> "Link kopiëren" and paste that link in the Extra field.'
+                'Reinis requires a one-time manual setup: open reinis.nl/kalender, enter your address, '
+                'click "Toevoegen aan agenda" -> "Link kopiëren" and paste that link in the Extra field '
+                '(the link does not expire).'
             )
         return url
 

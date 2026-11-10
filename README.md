@@ -111,7 +111,7 @@ Pickup dates are always displayed in the format **`wd dd mmm`** (e.g. `ma 07 apr
 | `10` – burgerportaal | **Required.** BPName: `assen`, `bar`, or `rmn` |
 | `15` – csv_file | **Required.** Full path to the local CSV file |
 | `16` – afvalinfo | **Required.** Municipality name (e.g. `sliedrecht`, `papendrecht`) |
-| `17` – reinis | *(optional)* Calendar link. Leave empty to look it up from Zipcode/Housenr. If that fails, open reinis.nl/kalender → **Toevoegen aan agenda** → **Link kopiëren** and paste the link here. |
+| `17` – reinis | **Required (one-time).** Calendar link: open reinis.nl/kalender, enter your address, click **Toevoegen aan agenda** → **Link kopiëren** and paste the link here. The link does not expire. |
 | All others | Leave **Extra** empty |
 
 ---
