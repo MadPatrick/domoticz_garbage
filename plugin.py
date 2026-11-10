@@ -5,7 +5,7 @@
 # Retrieves garbage pickup schedules and updates a Domoticz Text device.
 
 """
-<plugin key="GarbageCalendar" name="Garbage Calendar" author="MadPatrick" version="1.2.0"
+<plugin key="GarbageCalendar" name="Garbage Calendar" author="MadPatrick" version="1.2.1"
     externallink="https://github.com/MadPatrick/Domoticz_Garbage">
     <description>
         <h2>Garbage Calendar</h2>
@@ -42,6 +42,10 @@
             <tr>
                 <td style="padding:3px 16px 3px 0;">afvalinfo</td>
                 <td style="padding:3px 0;">municipality name (e.g. sliedrecht, papendrecht)</td>
+            </tr>
+            <tr>
+                <td style="padding:3px 16px 3px 0;">reinis</td>
+                <td style="padding:3px 0;">optional: calendar link from reinis.nl/kalender (Toevoegen aan agenda &gt; Link kopi&#235;ren); leave empty for automatic lookup</td>
             </tr>
             <tr>
                 <td style="padding:3px 16px 3px 0;">mijnafvalwijzer / mijnafvalwijzer_api</td>
@@ -1408,33 +1412,138 @@ class AfvalInfoModule(GarbageModule):
 # Module 17: m_reinis
 # --------------------------------------------------------------------------------------------
 
-class ReinisModule(OpzetApiModule):
-    name = 'Reinis'
-    _HOSTNAME = 'reinis.nl'
+class ReinisModule(GarbageModule):
+    """Reinis (Voorne aan Zee, Nissewaard, ...).
 
-    def _get_bag_id(self, hostname, zipcode, housenr, housenrsuf):
-        url = f'https://{hostname}/adressen/{zipcode}:{housenr}'
-        self._debug(f'GET {redact_url(url, zipcode, housenr)}')
-        raw = http_get(url)
-        if not raw or raw.strip().startswith('[]'):
-            self._error('Empty or [] address response')
+    Reinis replaced its Opzet-based site in 2026 with a new platform
+    (Scoop). The old /adressen/<postcode>:<huisnr> endpoint now returns 404.
+
+    New flow:
+      1. GET  /api/proxy/addresses/lookup?postcode=..&huisnummer=..&toevoeging=..
+         (public)  -> data.address.id
+      2. GET  /api/proxy/pickups/ical-subscription?addressId=<id>
+         (needs the site's session cookie)  -> data.url  (tokenised iCal feed)
+      3. GET  <iCal feed>  (public, token in the URL)
+
+    Step 2 is tried with a cookie session. If Reinis refuses it, paste the
+    "Abonnementslink" from reinis.nl/kalender -> "Toevoegen aan agenda" into
+    the Extra field; the plugin then reads that iCal feed directly.
+    """
+    name = 'Reinis'
+    _BASE = 'https://reinis.nl'
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._ical_url = ''
+        self._ical_key = ''
+
+    @staticmethod
+    def _session_opener():
+        import http.cookiejar
+        jar = http.cookiejar.CookieJar()
+        return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+
+    def _session_get(self, opener, url: str) -> str:
+        req = urllib.request.Request(url, headers={**DEFAULT_HEADERS, 'Accept': 'application/json, text/html'})
+        try:
+            with opener.open(req, timeout=30) as resp:
+                return resp.read().decode('utf-8', errors='replace')
+        except urllib.error.HTTPError as e:
+            self._debug(f'HTTP {e.code} for {url.split("?")[0]}')
+            return ''
+        except Exception as e:
+            self._debug(f'Request failed for {url.split("?")[0]}: {e}')
+            return ''
+
+    def _lookup_address_id(self, opener, zipcode: str, housenr: str, housenrsuf: str) -> str:
+        query = urllib.parse.urlencode({
+            'postcode': zipcode.replace(' ', '').upper(),
+            'huisnummer': housenr,
+            'toevoeging': housenrsuf or '',
+        })
+        url = f'{self._BASE}/api/proxy/addresses/lookup?{query}'
+        self._debug(f'GET {redact_url(url, zipcode, housenr, housenrsuf)}')
+        raw = self._session_get(opener, url)
+        if not raw:
+            self._error('Empty address lookup response - check Zipcode and Housenr')
             return ''
         try:
-            adata = json.loads(raw)
+            jdata = json.loads(raw)
         except json.JSONDecodeError:
-            self._error('Address JSON parse error')
+            self._error('Address lookup JSON parse error')
             return ''
-        bag_id = ''
-        for record in adata:
-            if not isinstance(record, dict):
+        address = (jdata.get('data') or {}).get('address') or {}
+        if not address.get('id'):
+            reason = (jdata.get('data') or {}).get('reason') or (jdata.get('error') or {}).get('code')
+            self._error(f'Address not found at Reinis ({reason or "no id"}) - check Zipcode, Housenr and Suffix')
+            return ''
+        return address['id']
+
+    def _resolve_ical_url(self, zipcode: str, housenr: str, housenrsuf: str) -> str:
+        opener = self._session_opener()
+        # Load the site first so it can set its session cookie.
+        self._session_get(opener, f'{self._BASE}/kalender')
+        address_id = self._lookup_address_id(opener, zipcode, housenr, housenrsuf)
+        if not address_id:
+            return ''
+        self._debug(f'addressId: {address_id}')
+        raw = self._session_get(
+            opener,
+            f'{self._BASE}/api/proxy/pickups/ical-subscription?addressId={urllib.parse.quote(address_id)}',
+        )
+        try:
+            url = ((json.loads(raw) if raw else {}).get('data') or {}).get('url', '')
+        except json.JSONDecodeError:
+            url = ''
+        if not url:
+            self._error(
+                'Could not get the Reinis calendar link automatically. Open reinis.nl/kalender, '
+                'click "Toevoegen aan agenda" -> "Link kopiëren" and paste that link in the Extra field.'
+            )
+        return url
+
+    @staticmethod
+    def _parse_ical(ical: str, today: datetime.date) -> List[Dict]:
+        # Unfold folded lines (RFC 5545: CRLF followed by a space or tab).
+        text = re.sub(r'\r?\n[ \t]', '', ical)
+        results = []
+        for block in re.findall(r'BEGIN:VEVENT(.*?)END:VEVENT', text, re.DOTALL):
+            m_date = re.search(r'^DTSTART[^:\r\n]*:(\d{8})', block, re.MULTILINE)
+            m_sum = re.search(r'^SUMMARY[^:\r\n]*:(.*)$', block, re.MULTILINE)
+            if not m_date or not m_sum:
                 continue
-            bag_id = record.get('bagid', '')
-            if record.get('huisletter', '') == housenrsuf:
-                break
-        return bag_id
+            d = parse_compact_date(m_date.group(1))
+            gtype = re.sub(r'\\[,;]', lambda x: x.group(0)[1], m_sum.group(1)).strip()
+            gtype = re.sub(r'\s+inzameling$', '', gtype, flags=re.IGNORECASE)
+            if d and d >= today:
+                results.append(GarbageModule._make_entry(gtype, d))
+        results.sort(key=lambda x: x['date'])
+        return results
 
     def fetch(self, zipcode, housenr, housenrsuf, extra):
-        return super().fetch(zipcode, housenr, housenrsuf, self._HOSTNAME)
+        extra = (extra or '').strip()
+        if extra.lower().startswith('webcal://'):
+            extra = 'https://' + extra[len('webcal://'):]
+
+        if extra.lower().startswith('http'):
+            ical_url = extra
+        else:
+            key = f'{zipcode}|{housenr}|{housenrsuf}'
+            if not self._ical_url or self._ical_key != key:
+                self._ical_url = self._resolve_ical_url(zipcode, housenr, housenrsuf)
+                self._ical_key = key
+            ical_url = self._ical_url
+        if not ical_url:
+            return []
+
+        self._debug(f'GET {ical_url.split("?")[0]}')
+        ical = http_get(ical_url)
+        if not ical or 'BEGIN:VCALENDAR' not in ical:
+            self._error('Empty or invalid iCal response from Reinis')
+            # Force a fresh calendar link next time.
+            self._ical_url = ''
+            return []
+        return self._parse_ical(ical, datetime.date.today())
 
 
 # --------------------------------------------------------------------------------------------
