@@ -9,7 +9,7 @@
     externallink="https://github.com/MadPatrick/Domoticz_Garbage">
     <description>
         <h2>Garbage Calendar</h2>
-        <p><strong>Version:</strong> 1.2.0</p>
+        <p><strong>Version:</strong> 1.2.1</p>
         <p>Retrieves your waste collection calendar and displays the upcoming collection dates in a Domoticz text device.</p>
         <h3>Configuration</h3>
         <p>Choose the <strong>Provider</strong> that matches your municipality. The <strong>Extra</strong> field's meaning depends on the selected provider:</p>
