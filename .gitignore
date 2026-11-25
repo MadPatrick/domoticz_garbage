@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+gc_cache_*.json
+gc_cache_*.json.tmp
+gc_*_token.txt

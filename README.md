@@ -1,7 +1,7 @@
 # Domoticz Garbage Calendar Plugin
 
 A Domoticz Python plugin that retrieves your garbage/waste collection schedule and displays upcoming pickup dates in a Domoticz Text device.  
-Supports 17 different waste-collection data sources used in the Netherlands and Belgium.
+Supports 18 different waste-collection data sources used in the Netherlands and Belgium.
 
 **Originaly based on the LUA script made by JvdZ
 
@@ -52,12 +52,14 @@ https://forum.domoticz.com/viewtopic.php?t=31295**
 4. In the Domoticz web interface go to **Setup → Hardware**, click **Add**, and choose **GarbageCalendar** from the type list.
 5. Fill in the parameters (see [Configuration](#configuration)) and click **Add**.
 
-Domoticz will create two **Text** devices:
+Domoticz will create two **Text** devices (Domoticz puts the hardware name in front, e.g. `Garbage - Calendar`):
 
 | Device name | Description |
 |---|---|
-| **Garbage Calendar** | Shows the next upcoming pickup dates |
-| **Garbage Container** | Shows a "Today / Tomorrow" reminder (see [Notification device](#notification-device)) |
+| **Calendar** | Shows the next upcoming pickup dates |
+| **Container** | Shows a "Today / Tomorrow" reminder (see [Notification device](#notification-device)) |
+
+The last successfully fetched calendar is stored in `gc_cache_<hardware id>.json` in the plugin folder, so the devices keep showing data after a restart even when the provider is temporarily unreachable.
 
 ---
 
@@ -69,14 +71,13 @@ These parameters are set in the Domoticz hardware setup UI:
 
 | Label | Description | Default |
 |---|---|---|
-| **Module** | Data source / waste provider (see [Supported modules](#supported-modules)) | `2` |
-| **Postcode** | Your postal code (e.g. `1234AB`) | *(empty)* |
-| **Huisnummer** | House number | *(empty)* |
-| **Huisnummer suffix** | House number addition (e.g. `A`, `bis`) | *(empty)* |
-| **Extra** | Module-specific extra value (see [Module-specific notes](#module-specific-notes)) | *(empty)* |
-| **Enable notification** | Send a push/e-mail notification on pickup days (`True` / `False`) | `False` |
-| **Domoticz IP** | IP address of the Domoticz server for sending notifications (`Address` field) | `127.0.0.1` |
-| **Domoticz Port** | Port of the Domoticz server for sending notifications (`Port` field) | `8080` |
+| **Provider** | Data source / waste provider (see [Supported modules](#supported-modules)) | `2` |
+| **Extra** | Provider-specific extra value (see [Module-specific notes](#module-specific-notes)) | *(empty)* |
+| **Zipcode** | Your postal code (e.g. `1234AB`) | *(empty)* |
+| **House number** | House number | *(empty)* |
+| **Suffix** | House number addition (e.g. `A`, `bis`) | *(empty)* |
+| **Notification** | Send a push/e-mail notification on pickup days (`Yes` / `No`) | `No` |
+| **Debug logging** | Extra log output for troubleshooting | off |
 
 ### config.txt settings
 
@@ -87,15 +88,16 @@ The plugin re-reads this file on every restart (no Domoticz restart required —
 |---|---|---|
 | `UpdateTime` | Time of day to refresh the schedule (HH:MM) | `02:30` |
 | `ShowEvents` | Number of upcoming pickups to display | `3` |
-| `TodayTime` | Until what time the "Today" label is shown (HH:MM) | `16:00` |
+| `TodayTime` | Until what time the "Today" label is shown (HH:MM) | `16:00` (the supplied `config.txt` uses `14:00`) |
 | `TomorrowTime` | From what time the "Tomorrow" label is shown (HH:MM) | `16:00` |
 | `NotifyTime` | Time at which the notification is sent on the pickup day or the day before (HH:MM) | `07:00` |
 | `NotifyLevel` | Priority of the notification (`-2`=very low … `2`=emergency) | `1` |
+| `NotifySubSystem` | Send only via this notification subsystem (e.g. `telegram`); empty = all | *(empty)* |
 | `LabelToday` | Label used when the pickup is today | `Today` |
 | `LabelTomorrow` | Label used when the pickup is tomorrow | `Tomorrow` |
 | `LabelNoData` | Text shown when no upcoming pickup data is available | `No collection data available` |
 
-> **Note:** Enabling or disabling notifications is done via the **Enable notification** dropdown in the Domoticz hardware configuration panel, not in `config.txt`.
+> **Note:** Enabling or disabling notifications is done via the **Notification** dropdown in the Domoticz hardware configuration panel, not in `config.txt`.
 Pickup dates are always displayed in the format **`wd dd mmm`** (e.g. `ma 07 apr`).
 
 ### Module-specific notes
@@ -107,6 +109,7 @@ Pickup dates are always displayed in the format **`wd dd mmm`** (e.g. `ma 07 apr
 | `3` – ximmio | **Required.** Company code. Open your municipality's website, press F12, search `controller.js` for `companyCode`. |
 | `6` – opzet (iCal) | **Required.** Hostname (e.g. `inzamelkalender.hvcgroep.nl`) |
 | `7` – opzet_api | **Required.** Hostname |
+| `18` – hvc_api | Leave empty (uses `inzamelkalender.hvcgroep.nl`) |
 | `8` – recycleapp-be | **Required.** Street name |
 | `10` – burgerportaal | **Required.** BPName: `assen`, `bar`, or `rmn` |
 | `15` – csv_file | **Required.** Full path to the local CSV file |
@@ -137,6 +140,7 @@ Pickup dates are always displayed in the format **`wd dd mmm`** (e.g. `ma 07 apr
 | 15 | csv_file | Local CSV file | Any |
 | 16 | afvalinfo | afvalinfo.nl via trashapi | 🇳🇱 NL |
 | 17 | reinis | reinis.nl address lookup + iCal feed | 🇳🇱 NL |
+| 18 | hvc_api | HVC Groep inzamelkalender (Opzet engine) | 🇳🇱 NL |
 
 ---
 
@@ -160,7 +164,7 @@ Unknown waste types are displayed as-is.
 
 ## Notification device
 
-The plugin automatically creates a second Text device called **"Garbage Container"** that shows a short reminder:
+The plugin automatically creates a second Text device called **"Container"** that shows a short reminder. When several types are collected on the same day they are combined, e.g. `Tomorrow : GFT + PMD`.
 
 | Situation | Text shown |
 |---|---|
@@ -173,14 +177,14 @@ No additional scripts or dzVents rules are needed — the plugin updates both de
 
 ### E-mail / push notifications
 
-Enable notifications via the **Enable notification** dropdown in the Domoticz hardware configuration panel (**Setup → Hardware → [plugin] → Edit**). The plugin will then send a notification via **all configured Domoticz notification channels** (e-mail, Pushover, Telegram, etc.) at the time specified by `NotifyTime`:
+Enable notifications via the **Notification** dropdown in the Domoticz hardware configuration panel (**Setup → Hardware → [plugin] → Edit**). The plugin will then send a notification via **all configured Domoticz notification channels** (e-mail, Pushover, Telegram, etc.) at the time specified by `NotifyTime`:
 
 | Situation | Notification sent |
 |---|---|
 | Collection day, at or after `NotifyTime` | `<LabelToday>: <type>` (e.g. `Today: Restafval`) |
 | Day before collection, at or after `NotifyTime` | `<LabelTomorrow>: <type>` (e.g. `Tomorrow: PMD`) |
 
-The notification is sent only once per day. To use e-mail notifications, configure your e-mail settings in Domoticz under **Setup → Settings → Notifications**.
+The notification is sent only once per day (also across plugin restarts). It needs a Domoticz build that offers `Domoticz.SendNotification()` to Python plugins; on older builds the plugin logs this once at start and disables notifications. To use e-mail notifications, configure your e-mail settings in Domoticz under **Setup → Settings → Notifications**.
 
 ---
 
@@ -192,5 +196,5 @@ The notification is sent only once per day. To use e-mail notifications, configu
 | Wrong data / empty response | Verify that your postcode and house number are correct for the selected module. |
 | Module 9 (omrin) fails to import | Install the `cryptography` package: `pip install cryptography`. |
 | ximmio returns no data | Find the correct `companyCode` for your municipality (see [Module-specific notes](#module-specific-notes)). |
-| "Garbage Container" device not updating | Check `TodayTime` and `TomorrowTime` in `config.txt`; restart the plugin after saving. |
-| No e-mail / push notification received | Enable notifications via the **Enable notification** dropdown in the hardware panel and verify `NotifyTime` in `config.txt`. Also check that notification channels are configured under **Setup → Settings → Notifications** in Domoticz. |
+| "Container" device not updating | Check `TodayTime` and `TomorrowTime` in `config.txt`; restart the plugin after saving. |
+| No e-mail / push notification received | Enable notifications via the **Notification** dropdown in the hardware panel and verify `NotifyTime` in `config.txt`. Also check that notification channels are configured under **Setup → Settings → Notifications** in Domoticz. |
