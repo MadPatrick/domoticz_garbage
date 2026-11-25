@@ -5,11 +5,11 @@
 # Retrieves garbage pickup schedules and updates a Domoticz Text device.
 
 """
-<plugin key="GarbageCalendar" name="Garbage Calendar" author="MadPatrick" version="1.2.1"
+<plugin key="GarbageCalendar" name="Garbage Calendar" author="MadPatrick" version="1.3.0"
     externallink="https://github.com/MadPatrick/Domoticz_Garbage">
     <description>
         <h2>Garbage Calendar</h2>
-        <p><strong>Version:</strong> 1.2.1</p>
+        <p><strong>Version:</strong> 1.3.0</p>
         <p>Retrieves your waste collection calendar and displays the upcoming collection dates in a Domoticz text device.</p>
         <h3>Configuration</h3>
         <p>Choose the <strong>Provider</strong> that matches your municipality. The <strong>Extra</strong> field's meaning depends on the selected provider:</p>
@@ -117,13 +117,14 @@ import json
 import re
 import os
 import base64
+import hashlib
 import html as _html
 import datetime
 import urllib.request
 import urllib.parse
 import urllib.error
 import threading
-from typing import List, Dict, Optional, Callable, Any
+from typing import List, Dict, Optional, Callable, Any, Tuple
 
 # --------------------------------------------------------------------------------------------
 # config.txt helper
@@ -162,8 +163,7 @@ def _read_config() -> Dict[str, str]:
         pass
     except OSError as exc:
         try:
-            import Domoticz as _Domoticz
-            _Domoticz.Error(f'[GC] Could not read config.txt: {exc}')
+            Domoticz.Error(f'[GC] Could not read config.txt: {exc}')
         except Exception:
             pass
     return cfg
@@ -235,6 +235,15 @@ INPUT_MONTHS: Dict[str, int] = {
 }
 
 
+def month_from_name(name: str) -> Optional[int]:
+    """Month number for a short or full (Dutch/English) month name.
+
+    Matches on the first three letters, so 'nov', 'november', 'maart'
+    and 'mrt' all work.
+    """
+    return INPUT_MONTHS.get((name or '').strip().lower().rstrip('.')[:3])
+
+
 def format_date(d: datetime.date, fmt: str) -> str:
     result = fmt
     result = result.replace('wdd', DUTCH_WEEKDAYS_LONG[d.weekday()])
@@ -279,7 +288,7 @@ def parse_dutch_date(s: str) -> Optional[datetime.date]:
                 dd, mm_str, yyyy = int(parts[0]), parts[1].lower(), int(parts[2])
             else:
                 dd, mm_str, yyyy = int(parts[1]), parts[2].lower(), today.year
-            mm = INPUT_MONTHS.get(mm_str)
+            mm = month_from_name(mm_str)
             if mm:
                 d = datetime.date(yyyy, mm, dd)
                 if d < today and len(parts[2]) != 4:
@@ -287,7 +296,7 @@ def parse_dutch_date(s: str) -> Optional[datetime.date]:
                 return d
         elif len(parts) == 2:
             dd, mm_str = int(parts[0]), parts[1].lower()
-            mm = INPUT_MONTHS.get(mm_str)
+            mm = month_from_name(mm_str)
             if mm:
                 d = datetime.date(today.year, mm, dd)
                 if d < today:
@@ -304,45 +313,45 @@ def parse_dutch_date(s: str) -> Optional[datetime.date]:
 
 DEFAULT_HEADERS = {'User-Agent': 'Garbage Calendar-DomoticzPlugin/1.0'}
 
+# Per-request timeout. Kept well below the 10 s x N requests Domoticz is
+# willing to wait for plugin threads on stop (see BasePlugin.onStop).
+HTTP_TIMEOUT_SECS = 15
 
-def http_get(url: str, headers: Optional[Dict] = None, timeout: int = 30) -> str:
-    merged = {**DEFAULT_HEADERS, **(headers or {})}
-    req = urllib.request.Request(url, headers=merged)
+# Set by BasePlugin.onStop so a fetch that is still running skips its
+# remaining requests instead of keeping Domoticz waiting.
+STOP_EVENT = threading.Event()
+
+
+def _log_http_error(msg: str) -> None:
+    try:
+        Domoticz.Error(msg)
+    except Exception:
+        pass
+
+
+def _http_request(req: urllib.request.Request, timeout: int) -> str:
+    url = req.full_url
+    if STOP_EVENT.is_set():
+        return ''
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read().decode('utf-8', errors='replace')
     except urllib.error.HTTPError as e:
-        try:
-            Domoticz.Error(f'HTTP {e.code} for {url}: {e.reason}')
-        except Exception:
-            pass
+        _log_http_error(f'HTTP {e.code} for {url_for_log(url)}: {e.reason}')
         return ''
     except Exception as e:
-        try:
-            Domoticz.Error(f'Request failed for {url}: {e}')
-        except Exception:
-            pass
+        _log_http_error(f'Request failed for {url_for_log(url)}: {e}')
         return ''
 
 
-def http_post(url: str, data: bytes, headers: Optional[Dict] = None, timeout: int = 30) -> str:
+def http_get(url: str, headers: Optional[Dict] = None, timeout: int = HTTP_TIMEOUT_SECS) -> str:
     merged = {**DEFAULT_HEADERS, **(headers or {})}
-    req = urllib.request.Request(url, data=data, headers=merged, method='POST')
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode('utf-8', errors='replace')
-    except urllib.error.HTTPError as e:
-        try:
-            Domoticz.Error(f'HTTP {e.code} for {url}: {e.reason}')
-        except Exception:
-            pass
-        return ''
-    except Exception as e:
-        try:
-            Domoticz.Error(f'Request failed for {url}: {e}')
-        except Exception:
-            pass
-        return ''
+    return _http_request(urllib.request.Request(url, headers=merged), timeout)
+
+
+def http_post(url: str, data: bytes, headers: Optional[Dict] = None, timeout: int = HTTP_TIMEOUT_SECS) -> str:
+    merged = {**DEFAULT_HEADERS, **(headers or {})}
+    return _http_request(urllib.request.Request(url, data=data, headers=merged, method='POST'), timeout)
 
 
 # --------------------------------------------------------------------------------------------
@@ -392,10 +401,112 @@ def redact_url(url: str, *extra_values: str) -> str:
             ))
     except Exception:
         pass
-    for value in extra_values:
+    for value in (*extra_values, *_LOG_REDACT_VALUES):
         if value:
             url = url.replace(value, '***')
     return url
+
+
+# Address values of the running hardware instance (zipcode, house number
+# with suffix, ...). Set once in BasePlugin.onStart; redact_url() and
+# url_for_log() mask them everywhere, also when they sit in the URL path.
+_LOG_REDACT_VALUES: List[str] = []
+# All configured values, also the short ones; only matched against whole
+# URL path segments.
+_LOG_REDACT_SEGMENTS: set = set()
+
+
+def set_log_redact_values(*values: str) -> None:
+    _LOG_REDACT_VALUES.clear()
+    _LOG_REDACT_SEGMENTS.clear()
+    for v in values:
+        v = (v or '').strip()
+        if v:
+            _LOG_REDACT_SEGMENTS.add(v.lower())
+        # Very short values (a 1-digit house number) would mask random
+        # characters all over the URL; path segments are handled in
+        # url_for_log() instead.
+        if len(v) >= 3 and v not in _LOG_REDACT_VALUES:
+            _LOG_REDACT_VALUES.append(v)
+    # Longest first, so '1234AB' is masked before a shorter overlapping value.
+    _LOG_REDACT_VALUES.sort(key=len, reverse=True)
+
+
+def url_for_log(url: str) -> str:
+    """Compact, privacy-safe form of *url* for error messages.
+
+    Drops the query string entirely (it may hold API keys, passwords,
+    tokens or address data) and masks path segments that contain the
+    configured address values.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except Exception:
+        return '<url>'
+    segments = []
+    for seg in parsed.path.split('/'):
+        if seg and (seg.lower() in _LOG_REDACT_SEGMENTS or seg.isdigit()
+                    or any(v in seg for v in _LOG_REDACT_VALUES)):
+            seg = '***'
+        segments.append(seg)
+    path = '/'.join(segments)
+    suffix = '?...' if parsed.query else ''
+    return f'{parsed.scheme}://{parsed.netloc}{path}{suffix}'
+
+
+# --------------------------------------------------------------------------------------------
+# Shared parsers
+# --------------------------------------------------------------------------------------------
+
+def parse_ical_events(ical: str, today: datetime.date, strip_suffix: str = '') -> List[Dict]:
+    """Parse all-day VEVENTs from an iCal feed into calendar entries.
+
+    Handles folded lines (RFC 5545), DTSTART with or without parameters
+    and escaped ',' / ';' in SUMMARY. *strip_suffix* (a regex) is removed
+    from the end of each SUMMARY, e.g. a whitespace + 'inzameling' pattern.
+    """
+    text = re.sub(r'\r?\n[ \t]', '', ical)
+    results = []
+    for block in re.findall(r'BEGIN:VEVENT(.*?)END:VEVENT', text, re.DOTALL):
+        m_date = re.search(r'^DTSTART[^:\r\n]*:(\d{8})', block, re.MULTILINE)
+        m_sum = re.search(r'^SUMMARY[^:\r\n]*:(.*)$', block, re.MULTILINE)
+        if not m_date or not m_sum:
+            continue
+        d = parse_compact_date(m_date.group(1))
+        gtype = re.sub(r'\\([,;\\])', r'\1', m_sum.group(1)).strip()
+        if strip_suffix:
+            gtype = re.sub(strip_suffix + '$', '', gtype, flags=re.IGNORECASE).strip()
+        if d and d >= today and gtype:
+            results.append({'type': gtype, 'date': d, 'icon_url': ''})
+    results.sort(key=lambda x: x['date'])
+    return results
+
+
+def pick_opzet_bag_id(records: Any, housenrsuf: str) -> Tuple[str, bool]:
+    """Choose the right bagId from an Opzet/HVC address lookup.
+
+    Returns (bag_id, exact). Matches the suffix against 'huisletter',
+    'toevoeging' or both combined (case-insensitive). Without a suffix the
+    first address without huisletter/toevoeging wins. If nothing matches,
+    the first record is used and *exact* is False so the caller can warn.
+    """
+    if not isinstance(records, list):
+        return '', False
+    wanted = (housenrsuf or '').strip().lower().lstrip('-')
+    candidates = [r for r in records if isinstance(r, dict) and (r.get('bagId') or r.get('bagid'))]
+    if not candidates:
+        return '', False
+
+    def bag(r):
+        return str(r.get('bagId') or r.get('bagid'))
+
+    for r in candidates:
+        letter = str(r.get('huisletter') or '').strip().lower()
+        addition = str(r.get('toevoeging') or '').strip().lower()
+        if wanted in (letter, addition, letter + addition):
+            if wanted or (not letter and not addition):
+                return bag(r), True
+    return bag(candidates[0]), len(candidates) == 1 and not wanted
 
 
 # --------------------------------------------------------------------------------------------
@@ -427,8 +538,8 @@ class GarbageModule:
             pass
 
     @staticmethod
-    def _make_entry(gtype: str, d: datetime.date, wdesc: str = '', icon_url: str = '') -> Dict:
-        return {'type': gtype, 'date': d, 'wdesc': wdesc, 'icon_url': icon_url}
+    def _make_entry(gtype: str, d: datetime.date, icon_url: str = '') -> Dict:
+        return {'type': gtype, 'date': d, 'icon_url': icon_url}
 
     def _fetch_yearly(
         self,
@@ -457,10 +568,12 @@ class GarbageModule:
             log_fn(f'GET {redact_url(url)}')
             raw = http_get(url)
             if not raw:
+                self._debug(f'No data for {year}')
                 continue
             try:
                 parsed = json.loads(raw)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                self._error(f'JSON error in calendar for {year}: {e}')
                 continue
             results.extend(parse_records(parsed, today))
             if len(results) >= max_results:
@@ -505,15 +618,13 @@ class MijnAfvalwijzerModule(GarbageModule):
             txt = block.group(0)
             m_type = re.search(r'href="#waste-([^"]+)"', txt)
             m_date = re.search(r'class="span-line-break">(.*?)</span>', txt, re.DOTALL)
-            m_desc = re.search(r'afvaldescr[^>]*>(.*?)</span>', txt, re.DOTALL)
             if not m_type or not m_date:
                 continue
             gtype = m_type.group(1).strip()
             dstr = re.sub(r'\s+', ' ', m_date.group(1)).strip()
-            wdesc = m_desc.group(1).strip() if m_desc else ''
             d = parse_dutch_date(dstr)
             if d and d >= today:
-                results.append(self._make_entry(gtype, d, wdesc))
+                results.append(self._make_entry(gtype, d))
 
         results.sort(key=lambda x: x['date'])
         return results
@@ -577,7 +688,7 @@ class MijnAfvalwijzerApiModule(GarbageModule):
 
 class XimmioModule(GarbageModule):
     name = 'Ximmio'
-    _HOSTS = ['https://wasteapi.ximmio.com'] #, 'https://wasteapi.2go-mobile.com']
+    _HOST = 'https://wasteapi.ximmio.com'
 
     def fetch(self, zipcode, housenr, housenrsuf, extra):
         companycode = extra.strip()
@@ -586,36 +697,30 @@ class XimmioModule(GarbageModule):
             return []
 
         today = datetime.date.today()
-        webhost = None
+        webhost = self._HOST
         unique_id = ''
 
-        for host in self._HOSTS:
-            post_data = urllib.parse.urlencode({
-                'companyCode': companycode,
-                'postCode': zipcode,
-                'houseNumber': housenr,
-                'houseNumberAddition': housenrsuf or '',
-            }).encode()
-            raw = http_post(f'{host}/api/FetchAdress', post_data,
-                            headers={'Content-Type': 'application/x-www-form-urlencoded'})
-            if not raw or raw.strip().startswith('[]'):
-                continue
-            try:
-                adata = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            datalist = adata.get('dataList', [])
-            if datalist and isinstance(datalist, list):
-                unique_id = datalist[0].get('UniqueId', '')
-                if unique_id:
-                    webhost = host
-                    break
+        post_data = urllib.parse.urlencode({
+            'companyCode': companycode,
+            'postCode': zipcode,
+            'houseNumber': housenr,
+            'houseNumberAddition': housenrsuf or '',
+        }).encode()
+        raw = http_post(f'{webhost}/api/FetchAdress', post_data,
+                        headers={'Content-Type': 'application/x-www-form-urlencoded'})
+        try:
+            adata = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            adata = {}
+        datalist = adata.get('dataList') if isinstance(adata, dict) else None
+        if datalist and isinstance(datalist, list) and isinstance(datalist[0], dict):
+            unique_id = datalist[0].get('UniqueId', '')
 
-        if not unique_id or not webhost:
+        if not unique_id:
             self._error('Could not retrieve UniqueId - check Zipcode, Housenr and Companycode')
             return []
 
-        self._log(f'UniqueId: {unique_id}')
+        self._debug(f'UniqueId: {unique_id}')
         start_date = today.strftime('%Y-%m-%d')
         end_date = (today + datetime.timedelta(days=365)).strftime('%Y-%m-%d')
         post_data = urllib.parse.urlencode({
@@ -635,16 +740,18 @@ class XimmioModule(GarbageModule):
             self._error('Calendar JSON parse error')
             return []
 
+        if not isinstance(cdata, dict):
+            self._error('Unexpected calendar response format')
+            return []
         results = []
-        for record in cdata.get('dataList', []):
+        for record in cdata.get('dataList') or []:
+            if not isinstance(record, dict):
+                continue
             gtype = record.get('_pickupTypeText', '')
-            wdesc = record.get('description', '') or ''
-            if wdesc == 'Null':
-                wdesc = ''
-            for dstr in record.get('pickupDates', []):
+            for dstr in record.get('pickupDates') or []:
                 d = parse_iso_date(dstr)
                 if d and d >= today:
-                    results.append(self._make_entry(gtype, d, wdesc))
+                    results.append(self._make_entry(gtype, d))
 
         results.sort(key=lambda x: x['date'])
         return results
@@ -670,12 +777,13 @@ class RovaApiModule(GarbageModule):
             if not isinstance(items, list):
                 return entries
             for record in items:
+                if not isinstance(record, dict):
+                    continue
                 waste_type = record.get('wasteType', {}) or {}
                 gtype = waste_type.get('code', '') if isinstance(waste_type, dict) else ''
-                wdesc = waste_type.get('title', '') if isinstance(waste_type, dict) else ''
                 d = parse_iso_date(record.get('date', ''))
                 if d and d >= today:
-                    entries.append(self._make_entry(gtype, d, wdesc))
+                    entries.append(self._make_entry(gtype, d))
             return entries
 
         return self._fetch_yearly(url_for_year, parse_records)
@@ -698,15 +806,18 @@ class Rd4ApiModule(GarbageModule):
 
         def parse_records(jdata, today):
             entries = []
-            outer = jdata.get('data', {}).get('items', [[]])
+            data = jdata.get('data') if isinstance(jdata, dict) else None
+            outer = data.get('items', [[]]) if isinstance(data, dict) else []
             items = outer[0] if outer and isinstance(outer, list) else []
             if not isinstance(items, list):
                 return entries
             for record in items:
+                if not isinstance(record, dict):
+                    continue
                 gtype = record.get('type', '')
                 d = parse_iso_date(record.get('date', ''))
                 if d and d >= today:
-                    entries.append(self._make_entry(gtype, d, gtype))
+                    entries.append(self._make_entry(gtype, d))
             return entries
 
         return self._fetch_yearly(url_for_year, parse_records)
@@ -731,13 +842,15 @@ class OpzetModule(GarbageModule):
         except json.JSONDecodeError:
             self._error('Address JSON parse error')
             return ''
-        bag_id = ''
-        for record in adata:
-            if not isinstance(record, dict):
-                continue
-            bag_id = record.get('bagId', '')
-            if record.get('huisletter', '') == housenrsuf:
-                break
+        return self._pick_bag_id(adata, housenrsuf)
+
+    def _pick_bag_id(self, adata, housenrsuf: str) -> str:
+        bag_id, exact = pick_opzet_bag_id(adata, housenrsuf)
+        if bag_id and not exact:
+            self._error(
+                'No address in the lookup matches the Suffix exactly - using the first result. '
+                'Check the Suffix field if the calendar looks wrong.'
+            )
         return bag_id
 
     def fetch(self, zipcode, housenr, housenrsuf, extra):
@@ -760,18 +873,7 @@ class OpzetModule(GarbageModule):
             self._error('Empty iCal response')
             return []
 
-        results = []
-        for m in re.finditer(
-            r'DTSTART;VALUE=DATE:(\d{8})\r?\n.*?SUMMARY:(.*?)\r?\n',
-            ical, re.DOTALL
-        ):
-            d = parse_compact_date(m.group(1))
-            gtype = re.sub(r'[\r\n\\]', '', m.group(2)).strip()
-            if d and d >= today:
-                results.append(self._make_entry(gtype, d))
-
-        results.sort(key=lambda x: x['date'])
-        return results
+        return parse_ical_events(ical, today)
 
 
 # --------------------------------------------------------------------------------------------
@@ -816,6 +918,8 @@ class OpzetApiModule(OpzetModule):
 
         def parse_records(cal_data, today):
             entries = []
+            if not isinstance(cal_data, list):
+                return entries
             for record in cal_data:
                 if not isinstance(record, dict):
                     continue
@@ -866,9 +970,11 @@ class RecycleAppBeModule(GarbageModule):
             self._error('Could not get access token')
             return []
         try:
-            access_token = json.loads(raw).get('accessToken', '')
+            jtoken = json.loads(raw)
         except json.JSONDecodeError:
+            self._error('Access token JSON parse error')
             return []
+        access_token = jtoken.get('accessToken', '') if isinstance(jtoken, dict) else ''
         if not access_token:
             self._error('Empty access token')
             return []
@@ -877,20 +983,18 @@ class RecycleAppBeModule(GarbageModule):
 
         raw = http_get(f'{self._BASE_URL}/zipcodes?q={urllib.parse.quote(zipcode)}',
                        headers=auth_headers)
-        try:
-            postcode_id = json.loads(raw).get('items', [{}])[0].get('id', '')
-        except (json.JSONDecodeError, IndexError):
-            self._error('Could not get postcode_id')
+        postcode_id = self._first_item_id(raw)
+        if not postcode_id:
+            self._error('Could not get postcode_id - check Zipcode')
             return []
 
         raw = http_get(
             f'{self._BASE_URL}/streets?q={urllib.parse.quote(street)}&zipcodes={postcode_id}',
             headers=auth_headers,
         )
-        try:
-            street_id = json.loads(raw).get('items', [{}])[0].get('id', '')
-        except (json.JSONDecodeError, IndexError):
-            self._error('Could not get street_id')
+        street_id = self._first_item_id(raw)
+        if not street_id:
+            self._error('Could not get street_id - check the street name in the Extra field')
             return []
 
         start = today.strftime('%Y-%m-%d')
@@ -907,17 +1011,34 @@ class RecycleAppBeModule(GarbageModule):
         except json.JSONDecodeError:
             self._error('Calendar JSON parse error')
             return []
+        if not isinstance(cdata, dict):
+            self._error('Unexpected calendar response format')
+            return []
 
         results = []
-        for item in cdata.get('items', []):
-            fraction = item.get('fraction', {}) or {}
-            gtype = fraction.get('name', {}).get('nl', '') if isinstance(fraction, dict) else ''
+        for item in cdata.get('items') or []:
+            if not isinstance(item, dict):
+                continue
+            fraction = item.get('fraction') or {}
+            name = fraction.get('name') if isinstance(fraction, dict) else None
+            gtype = name.get('nl', '') if isinstance(name, dict) else ''
             d = parse_iso_date(item.get('timestamp', ''))
             if d and d >= today:
                 results.append(self._make_entry(gtype, d))
 
         results.sort(key=lambda x: x['date'])
         return results
+
+    @staticmethod
+    def _first_item_id(raw: str) -> str:
+        try:
+            jdata = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            return ''
+        items = jdata.get('items') if isinstance(jdata, dict) else None
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            return str(items[0].get('id', '') or '')
+        return ''
 
 
 # --------------------------------------------------------------------------------------------
@@ -930,7 +1051,6 @@ class OmrinModule(GarbageModule):
     def fetch(self, zipcode, housenr, housenrsuf, extra):
         try:
             import uuid
-            import base64
             from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
             from cryptography.hazmat.primitives import serialization
             from cryptography.hazmat.backends import default_backend
@@ -962,7 +1082,7 @@ class OmrinModule(GarbageModule):
             self._error('Token JSON parse error')
             return []
 
-        public_key_b64 = jtoken.get('PublicKey', '')
+        public_key_b64 = jtoken.get('PublicKey', '') if isinstance(jtoken, dict) else ''
         if not public_key_b64:
             self._error('No PublicKey in token response')
             return []
@@ -998,10 +1118,13 @@ class OmrinModule(GarbageModule):
         except json.JSONDecodeError:
             self._error('FetchAccount JSON parse error')
             return []
+        if not isinstance(jdata, dict):
+            self._error('Unexpected FetchAccount response format')
+            return []
 
         results = []
         for key in ['CalendarV2', 'CalendarHomeV2']:
-            for record in jdata.get(key, []):
+            for record in jdata.get(key) or []:
                 if not isinstance(record, dict):
                     continue
                 gtype = record.get('Omschrijving', '')
@@ -1056,10 +1179,12 @@ class BurgerportaalModule(GarbageModule):
         raw = http_get(url, headers={'authorization': id_token})
         try:
             adata = json.loads(raw)
-            address_id = adata[0].get('addressId', '') if adata else ''
-        except (json.JSONDecodeError, IndexError, KeyError):
+        except json.JSONDecodeError:
             self._error('Could not get addressId')
             return []
+        address_id = ''
+        if isinstance(adata, list) and adata and isinstance(adata[0], dict):
+            address_id = adata[0].get('addressId', '')
 
         if not address_id:
             self._error('Empty addressId')
@@ -1074,6 +1199,9 @@ class BurgerportaalModule(GarbageModule):
             self._error('Calendar JSON parse error')
             return []
 
+        if not isinstance(cal, list):
+            self._error('Unexpected calendar response format')
+            return []
         results = []
         for record in cal:
             if not isinstance(record, dict):
@@ -1116,6 +1244,8 @@ class BurgerportaalModule(GarbageModule):
         raw = http_post(url, b'', headers={'Content-Length': '0'})
         try:
             data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise json.JSONDecodeError('not an object', raw, 0)
             id_token = data.get('idToken', '')
             refresh_token = data.get('refreshToken', '')
             if refresh_token:
@@ -1132,6 +1262,8 @@ class BurgerportaalModule(GarbageModule):
                         headers={'Content-Type': 'application/x-www-form-urlencoded'})
         try:
             data = json.loads(raw)
+            if not isinstance(data, dict):
+                return self._signup_and_get_token()
             id_token = data.get('id_token', '')
             new_refresh = data.get('refresh_token', '')
             if new_refresh:
@@ -1147,7 +1279,9 @@ class BurgerportaalModule(GarbageModule):
 
 class RmnModule(BurgerportaalModule):
     name = 'RMN'
-    _RMN_ORG_ID = '138204213564933597'
+    # Same organisation as Burgerportaal with BPName "rmn"; kept as its own
+    # provider (and token file) so existing configurations keep working.
+    _RMN_ORG_ID = BurgerportaalModule._BP_CODES['rmn']
 
     def __init__(self, token_file: Optional[str] = None):
         _plugin_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1244,10 +1378,14 @@ class ZuidLimburgModule(GarbageModule):
         try:
             if len(parts) >= 2:
                 dd = int(parts[0])
-                mm = INPUT_MONTHS.get(parts[1].lower())
-                yyyy = int(parts[-1]) if (len(parts) > 2 and parts[-1].isdigit() and len(parts[-1]) == 4) else today.year
+                mm = month_from_name(parts[1])
+                has_year = len(parts) > 2 and parts[-1].isdigit() and len(parts[-1]) == 4
+                yyyy = int(parts[-1]) if has_year else today.year
                 if mm:
-                    return datetime.date(yyyy, mm, dd)
+                    d = datetime.date(yyyy, mm, dd)
+                    if not has_year and d < today:
+                        d = datetime.date(yyyy + 1, mm, dd)
+                    return d
         except (ValueError, TypeError):
             pass
         return None
@@ -1277,8 +1415,10 @@ class MontferlandModule(GarbageModule):
         try:
             adata = json.loads(raw)
         except json.JSONDecodeError:
+            self._error('Address JSON parse error')
             return []
-        if not adata:
+        if not isinstance(adata, list) or not adata or not isinstance(adata[0], dict):
+            self._error('Unexpected address response format')
             return []
         adres_id = adata[0].get('AdresID', '')
         admin_id = adata[0].get('AdministratieID', '')
@@ -1297,6 +1437,8 @@ class MontferlandModule(GarbageModule):
 
         def parse_records(items, today):
             entries = []
+            if not isinstance(items, list):
+                return entries
             for record in items:
                 if not isinstance(record, dict):
                     continue
@@ -1444,9 +1586,11 @@ class ReinisModule(GarbageModule):
         return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
 
     def _session_get(self, opener, url: str) -> str:
+        if STOP_EVENT.is_set():
+            return ''
         req = urllib.request.Request(url, headers={**DEFAULT_HEADERS, 'Accept': 'application/json, text/html'})
         try:
-            with opener.open(req, timeout=30) as resp:
+            with opener.open(req, timeout=HTTP_TIMEOUT_SECS) as resp:
                 return resp.read().decode('utf-8', errors='replace')
         except urllib.error.HTTPError as e:
             self._debug(f'HTTP {e.code} for {url.split("?")[0]}')
@@ -1472,9 +1616,14 @@ class ReinisModule(GarbageModule):
         except json.JSONDecodeError:
             self._error('Address lookup JSON parse error')
             return ''
-        address = (jdata.get('data') or {}).get('address') or {}
+        if not isinstance(jdata, dict):
+            self._error('Unexpected address lookup response format')
+            return ''
+        data = jdata.get('data') if isinstance(jdata.get('data'), dict) else {}
+        error = jdata.get('error') if isinstance(jdata.get('error'), dict) else {}
+        address = data.get('address') if isinstance(data.get('address'), dict) else {}
         if not address.get('id'):
-            reason = (jdata.get('data') or {}).get('reason') or (jdata.get('error') or {}).get('code')
+            reason = data.get('reason') or error.get('code')
             self._error(f'Address not found at Reinis ({reason or "no id"}) - check Zipcode, Housenr and Suffix')
             return ''
         return address['id']
@@ -1492,9 +1641,11 @@ class ReinisModule(GarbageModule):
             f'{self._BASE}/api/proxy/pickups/ical-subscription?addressId={urllib.parse.quote(address_id)}',
         )
         try:
-            url = ((json.loads(raw) if raw else {}).get('data') or {}).get('url', '')
+            jdata = json.loads(raw) if raw else {}
         except json.JSONDecodeError:
-            url = ''
+            jdata = {}
+        data = jdata.get('data') if isinstance(jdata, dict) else None
+        url = data.get('url', '') if isinstance(data, dict) else ''
         if not url:
             self._error(
                 'Reinis requires a one-time manual setup: open reinis.nl/kalender, enter your address, '
@@ -1502,24 +1653,6 @@ class ReinisModule(GarbageModule):
                 '(the link does not expire).'
             )
         return url
-
-    @staticmethod
-    def _parse_ical(ical: str, today: datetime.date) -> List[Dict]:
-        # Unfold folded lines (RFC 5545: CRLF followed by a space or tab).
-        text = re.sub(r'\r?\n[ \t]', '', ical)
-        results = []
-        for block in re.findall(r'BEGIN:VEVENT(.*?)END:VEVENT', text, re.DOTALL):
-            m_date = re.search(r'^DTSTART[^:\r\n]*:(\d{8})', block, re.MULTILINE)
-            m_sum = re.search(r'^SUMMARY[^:\r\n]*:(.*)$', block, re.MULTILINE)
-            if not m_date or not m_sum:
-                continue
-            d = parse_compact_date(m_date.group(1))
-            gtype = re.sub(r'\\[,;]', lambda x: x.group(0)[1], m_sum.group(1)).strip()
-            gtype = re.sub(r'\s+inzameling$', '', gtype, flags=re.IGNORECASE)
-            if d and d >= today:
-                results.append(GarbageModule._make_entry(gtype, d))
-        results.sort(key=lambda x: x['date'])
-        return results
 
     def fetch(self, zipcode, housenr, housenrsuf, extra):
         extra = (extra or '').strip()
@@ -1544,7 +1677,7 @@ class ReinisModule(GarbageModule):
             # Force a fresh calendar link next time.
             self._ical_url = ''
             return []
-        return self._parse_ical(ical, datetime.date.today())
+        return parse_ical_events(ical, datetime.date.today(), strip_suffix=r'\s+inzameling')
 
 
 # --------------------------------------------------------------------------------------------
@@ -1571,25 +1704,22 @@ class HvcGroepModule(OpzetApiModule):
         self._log(f'GET {redact_url(url, zipcode, housenr, housenrsuf)}')
         raw = http_get(url)
         if not raw or raw.strip().startswith('[]'):
-            self._error(f'Empty or [] address response for {addr}')
+            self._error('Empty or [] address response - check Zipcode, Housenr and Suffix')
             return ''
         try:
             adata = json.loads(raw)
         except json.JSONDecodeError:
-            self._error(f'Address JSON parse error: {raw[:200]!r}')
+            self._error('Address JSON parse error')
+            self._debug(f'Address response: {raw[:200]!r}')
             return ''
         if not isinstance(adata, list) or not adata:
-            self._error(f'Unexpected address response format: {raw[:200]!r}')
+            self._error('Unexpected address response format')
+            self._debug(f'Address response: {raw[:200]!r}')
             return ''
-        bag_id = ''
-        for record in adata:
-            if not isinstance(record, dict):
-                continue
-            bag_id = record.get('bagId', '') or record.get('bagid', '')
-            if record.get('huisletter', '') == housenrsuf:
-                break
+        bag_id = self._pick_bag_id(adata, housenrsuf)
         if not bag_id:
-            self._error(f'bagId missing in response keys: {list(adata[0].keys()) if adata else []}')
+            first = adata[0] if isinstance(adata[0], dict) else {}
+            self._error(f'bagId missing in response keys: {list(first.keys())}')
         return bag_id
 
     def fetch(self, zipcode, housenr, housenrsuf, extra):
@@ -1627,12 +1757,16 @@ MODULES: Dict[str, GarbageModule] = {
 
 class BasePlugin:
     UNIT_TEXT   = 1  # Garbage Calendar text-device
-    UNIT_NOTIFY = 2  # Garbae notification device
+    UNIT_NOTIFY = 2  # Garbage notification device
     HEARTBEAT_SECS = 30
+    DATE_FMT = 'wd dd mmm'
     # Minimum time between retries of a failing fetch (empty result or
     # exception), so a persistently failing remote site is not hammered
     # every single 30s heartbeat.
     FETCH_RETRY_BACKOFF_SECS = 20 * 60
+    # How long onStop waits for a running fetch. Domoticz itself gives up
+    # on plugin threads after ~10 s, so stay below that.
+    STOP_JOIN_SECS = 8
 
     def __init__(self):
         self._module: Optional[GarbageModule] = None
@@ -1640,7 +1774,6 @@ class BasePlugin:
         self._housenr = ''
         self._housenrsuf = ''
         self._extra = ''
-        self._date_fmt = 'wd dd mmm'
         self._show_events = 3
         self._update_hour = 2
         self._update_min = 30
@@ -1655,14 +1788,10 @@ class BasePlugin:
         self._last_failed_fetch_time: Optional[datetime.datetime] = None
         self._cached_results: List[Dict] = []
         self._fetching = False
-        # Set by the worker thread (_do_fetch) when a fetch attempt has
-        # completed and _cached_results / _last_fetch_date may have
-        # changed. Consumed by onHeartbeat (the main/callback thread) to
-        # decide when to touch Devices[...] / send notifications - the
-        # worker thread itself must never touch those, they are not
-        # thread-safe.
-        self._results_ready = False
+        self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._cache_file = ''
+        self._cache_key = ''
         self.imageID = -1
         self._label_today = _CONFIG_DEFAULTS['LabelToday']
         self._label_tomorrow = _CONFIG_DEFAULTS['LabelTomorrow']
@@ -1688,6 +1817,7 @@ class BasePlugin:
         return str(raw).strip().lower() in ("true", "1", "yes", "on")
 
     def onStart(self):
+        STOP_EVENT.clear()
         Domoticz.Heartbeat(self.HEARTBEAT_SECS)
 
         self.debug = self._read_boolean_parameter('EnableDebug', False)
@@ -1700,7 +1830,7 @@ class BasePlugin:
         # fallback below, but the new fields themselves stay empty in the
         # hardware edit screen until someone fills them in there. Warn once
         # per start so that isn't a silent trap - re-entering the values
-        # shown below into the new fields (then saving) finishes the move.
+        # into the new fields (then saving) finishes the move.
         legacy_in_use = {
             'Provider': (Parameters.get('Provider', ''), Parameters.get('Mode1', '')),
             'Zipcode': (Parameters.get('Zipcode', ''), Parameters.get('Mode2', '')),
@@ -1717,8 +1847,7 @@ class BasePlugin:
             Domoticz.Log(
                 'Still using legacy Mode1-6 values for: ' + ', '.join(fields_on_fallback) + '. '
                 'Open this hardware\'s settings, copy those values into the new fields with the '
-                'same names, and save once to finish moving to the new settings layout - the '
-                'values currently in use are logged below.'
+                'same names, and save once to finish moving to the new settings layout.'
             )
 
         module_key = str(self._read_migrated_parameter('Provider', 'Mode1', '2')).strip()
@@ -1726,7 +1855,16 @@ class BasePlugin:
         self._housenr = str(self._read_migrated_parameter('HouseNumber', 'Mode3', '')).strip()
         self._housenrsuf = str(self._read_migrated_parameter('Suffix', 'Mode4', '')).strip()
         self._extra = str(self._read_migrated_parameter('ExtraValue', 'Mode5', '')).strip()
-        self._date_fmt = 'wd dd mmm'
+
+        # Mask this instance's address everywhere it could end up in the log.
+        set_log_redact_values(
+            self._zipcode,
+            self._zipcode.replace(' ', ''),
+            self._zipcode.replace(' ', '').upper(),
+            self._zipcode.replace(' ', '').lower(),
+            self._housenr,
+            f'{self._housenr}{self._housenrsuf}',
+        )
 
         cfg = _read_config()
 
@@ -1743,6 +1881,12 @@ class BasePlugin:
         self._today_to_min = _parse_hhmm_to_min(cfg.get('TodayTime', '16:00'), 16 * 60)
         self._tomorrow_until_min = _parse_hhmm_to_min(cfg.get('TomorrowTime', '16:00'), 16 * 60)
         self._notify_enabled = str(self._read_migrated_parameter('Notification', 'Mode6', 'false')).strip().lower() == 'true'
+        if self._notify_enabled and not hasattr(Domoticz, 'SendNotification'):
+            Domoticz.Error(
+                'Notification is enabled, but this Domoticz version has no Domoticz.SendNotification() '
+                'for plugins - notifications are disabled. The Container device still works.'
+            )
+            self._notify_enabled = False
         self._notify_time_min = _parse_hhmm_to_min(cfg.get('NotifyTime', '07:00'), 7 * 60)
         try:
             self._notify_level = max(-2, min(2, int(cfg.get('NotifyLevel', '1') or '1')))
@@ -1759,10 +1903,7 @@ class BasePlugin:
             # icon's Base (in icons.txt, used as the Images dict key) must
             # start with this plugin's key ("GarbageCalendar") - Domoticz
             # only loads a plugin's pre-existing custom icons into Images at
-            # startup when Base LIKE '<PluginKey>%'. The short "Garbage"
-            # Base used before didn't satisfy that, so Images never
-            # contained it on restart and it was silently recreated (and
-            # re-logged as "created") every single time instead of found.
+            # startup when Base LIKE '<PluginKey>%'.
             if "GarbageCalendar" not in Images:
                 Domoticz.Image("Garbage.zip").Create()
             if "GarbageCalendar" in Images:
@@ -1779,7 +1920,7 @@ class BasePlugin:
 
         Domoticz.Log(
             f'Garbage Calendar started | module: {self._module.name} | '
-            f'zipcode: {self._zipcode} | housenr: {self._housenr}{self._housenrsuf} | '
+            f'address: {"set" if self._zipcode and self._housenr else "not set"} | '
             f'refresh at: {self._update_hour:02d}:{self._update_min:02d} | '
             f'events: {self._show_events} | '
             f'today until: {self._today_to_min // 60:02d}:{self._today_to_min % 60:02d} | '
@@ -1798,9 +1939,28 @@ class BasePlugin:
             self._create_notify_device()
             Domoticz.Log('Text device "Container" created')
 
+        self._apply_icon_to_existing_devices()
+
+        # Restore the last known calendar so the devices show data straight
+        # away, even when the provider is unreachable right after a restart.
+        hardware_id = str(Parameters.get('HardwareID', '') or '0')
+        self._cache_file = os.path.join(_PLUGIN_DIR, f'gc_cache_{hardware_id}.json')
+        self._cache_key = hashlib.sha256(
+            f'{module_key}|{self._zipcode}|{self._housenr}|{self._housenrsuf}|{self._extra}'.encode('utf-8')
+        ).hexdigest()
+        self._load_cache()
+        self._update_device()
+
         self._trigger_fetch()
 
     def onStop(self):
+        STOP_EVENT.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            Domoticz.Log('Waiting for running fetch to finish...')
+            thread.join(timeout=self.STOP_JOIN_SECS)
+            if thread.is_alive():
+                Domoticz.Error('Fetch thread did not stop in time')
         Domoticz.Log('Garbage Calendar stopped')
 
     def onHeartbeat(self):
@@ -1811,19 +1971,14 @@ class BasePlugin:
         today = now.date()
 
         with self._lock:
-            results_ready = self._results_ready
-            self._results_ready = False
             already_fetched_today = (self._last_fetch_date == today)
             last_failed = self._last_failed_fetch_time
 
-        # Fresh results (or a failed attempt) came in from the worker thread
-        # since the last heartbeat - this is the (main/callback) thread that
-        # is allowed to touch Devices[...] / send notifications, so do that
-        # update here rather than from the worker thread.
-        if results_ready:
-            self._update_device()
-        elif already_fetched_today:
-            self._update_device()
+        # Always refresh the devices from the cache: the Today/Tomorrow
+        # labels and the notification depend on the clock, not only on new
+        # data. _update_device only writes when the text actually changes,
+        # and this is the (main/callback) thread that may touch Devices[...].
+        self._update_device()
 
         if not already_fetched_today:
             past_update_time = (
@@ -1848,30 +2003,95 @@ class BasePlugin:
         Domoticz.Device(Name='Container', Unit=self.UNIT_NOTIFY,
                         TypeName='Text', Used=1, **image_kwarg).Create()
 
+    def _apply_icon_to_existing_devices(self):
+        """Give devices created before the icon pack loaded the plugin icon."""
+        if self.imageID < 0:
+            return
+        for unit in (self.UNIT_TEXT, self.UNIT_NOTIFY):
+            if unit in Devices and Devices[unit].Image != self.imageID:
+                Devices[unit].Update(nValue=Devices[unit].nValue,
+                                     sValue=Devices[unit].sValue,
+                                     Image=self.imageID)
+
+    # ----------------------------------------------------------------------------------------
+    # Cache (last good calendar + date of the last notification), per hardware instance
+    # ----------------------------------------------------------------------------------------
+
+    def _load_cache(self):
+        try:
+            with open(self._cache_file, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as exc:
+            Domoticz.Debug(f'[GC] Could not read cache: {exc}')
+            return
+        if not isinstance(data, dict) or data.get('key') != self._cache_key:
+            Domoticz.Debug('[GC] Cache belongs to other settings - ignored')
+            return
+        results = []
+        for item in data.get('results') or []:
+            if not isinstance(item, dict):
+                continue
+            d = parse_iso_date(str(item.get('date', '')))
+            if d:
+                results.append({'type': str(item.get('type', '')), 'date': d,
+                                'icon_url': str(item.get('icon_url', '') or '')})
+        results.sort(key=lambda x: x['date'])
+        with self._lock:
+            self._cached_results = results
+        self._notify_sent_date = parse_iso_date(str(data.get('notify_sent', '') or ''))
+        Domoticz.Debug(f'[GC] Restored {len(results)} cached event(s)')
+
+    def _save_cache(self):
+        if not self._cache_file:
+            return
+        with self._lock:
+            results = list(self._cached_results)
+        data = {
+            'key': self._cache_key,
+            'results': [{'type': r['type'], 'date': r['date'].isoformat(),
+                         'icon_url': r.get('icon_url', '')} for r in results],
+            'notify_sent': self._notify_sent_date.isoformat() if self._notify_sent_date else '',
+        }
+        tmp = self._cache_file + '.tmp'
+        try:
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump(data, fh)
+            os.replace(tmp, self._cache_file)
+        except OSError as exc:
+            Domoticz.Debug(f'[GC] Could not write cache: {exc}')
+
+    # ----------------------------------------------------------------------------------------
+    # Fetching (background thread)
+    # ----------------------------------------------------------------------------------------
+
     def _trigger_fetch(self):
         with self._lock:
             if self._fetching:
                 return
             self._fetching = True
-        t = threading.Thread(target=self._do_fetch, daemon=True)
-        t.start()
+        self._thread = threading.Thread(target=self._do_fetch, name='GarbageFetch', daemon=True)
+        self._thread.start()
 
     def _do_fetch(self):
-        # Runs in a background threading.Thread (see _trigger_fetch). It must
-        # do ONLY the network fetch/parsing here and hand the outcome back
-        # through _cached_results/_last_fetch_date/_last_failed_fetch_time -
-        # it must NEVER touch Devices[...] or call Domoticz.SendNotification()
+        # Runs in a background threading.Thread (see _trigger_fetch). It does
+        # ONLY the network fetch/parsing and hands the outcome back through
+        # _cached_results/_last_fetch_date/_last_failed_fetch_time - it must
+        # NEVER touch Devices[...] or call Domoticz.SendNotification()
         # itself, since those are not safe to use outside Domoticz's own
-        # callback thread. The actual device/notification update happens in
-        # onHeartbeat (main thread) once _results_ready is seen set.
+        # callback thread. onHeartbeat (main thread) picks the new data up.
+        name = self._module.name
         try:
-            Domoticz.Log(f'Fetching calendar data from {self._module.name}...')
+            Domoticz.Log(f'Fetching calendar data from {name}...')
             results = self._module.fetch(
                 self._zipcode,
                 self._housenr,
                 self._housenrsuf,
                 self._extra,
             )
+            if STOP_EVENT.is_set():
+                return
             with self._lock:
                 if results:
                     # A genuinely non-empty, successfully parsed result -
@@ -1884,22 +2104,29 @@ class BasePlugin:
                     # An empty result can't be distinguished here from a
                     # silently-swallowed HTTP/parse failure inside the
                     # module, so treat it like a failure: don't mark today
-                    # as fetched (that would delay the retry until the next
-                    # UpdateTime) and record the failure time so the
+                    # as fetched and record the failure time so the
                     # retry-backoff in onHeartbeat applies. Keep whatever
-                    # was cached previously rather than overwriting good
-                    # data with an empty list.
+                    # was cached previously.
                     self._last_failed_fetch_time = datetime.datetime.now()
-                self._results_ready = True
-            Domoticz.Log(f'Fetch complete: {len(results)} upcoming event(s) found')
+            if results:
+                self._save_cache()
+                Domoticz.Log(f'Fetch complete: {len(results)} upcoming event(s) found')
+            else:
+                Domoticz.Error(
+                    f'Fetch from {name} returned no upcoming events - keeping the previous '
+                    f'calendar, retrying in {self.FETCH_RETRY_BACKOFF_SECS // 60} minutes'
+                )
         except Exception as e:
-            Domoticz.Error(f'Fetch error: {e}')
+            Domoticz.Error(f'Fetch error ({name}): {type(e).__name__}: {e}')
             with self._lock:
                 self._last_failed_fetch_time = datetime.datetime.now()
-                self._results_ready = True
         finally:
             with self._lock:
                 self._fetching = False
+
+    # ----------------------------------------------------------------------------------------
+    # Devices and notification (main thread only)
+    # ----------------------------------------------------------------------------------------
 
     def _update_device(self):
         today = datetime.date.today()
@@ -1923,7 +2150,7 @@ class BasePlugin:
                 elif r['date'] == tomorrow:
                     date_str = self._label_tomorrow
                 else:
-                    date_str = format_date(r['date'], self._date_fmt)
+                    date_str = format_date(r['date'], self.DATE_FMT)
                 display_type = apply_type_alias(r['type'])
                 icon_url = r.get('icon_url', '')
 
@@ -1959,14 +2186,26 @@ class BasePlugin:
         if Devices[self.UNIT_TEXT].sValue != text:
             Devices[self.UNIT_TEXT].Update(nValue=0, sValue=text)
 
-    def _send_notify_if_needed(self, future: List[Dict]) -> None:
+    @staticmethod
+    def _types_on(future: List[Dict], day: datetime.date) -> str:
+        """All waste types collected on *day*, e.g. 'GFT + PMD' (empty if none)."""
+        types: List[str] = []
+        for entry in future:
+            if entry['date'] > day:
+                break
+            if entry['date'] == day:
+                t = apply_type_alias(entry['type'])
+                if t and t not in types:
+                    types.append(t)
+        return ' + '.join(types)
+
+    def _send_notify_if_needed(self, today_types: str, tomorrow_types: str) -> None:
         """Send a Domoticz notification (e-mail / push) at the configured NotifyTime."""
         if not self._notify_enabled:
             return
 
         now = datetime.datetime.now()
         today = now.date()
-        tomorrow = today + datetime.timedelta(days=1)
         current_minutes = now.hour * 60 + now.minute
 
         if current_minutes < self._notify_time_min:
@@ -1974,19 +2213,16 @@ class BasePlugin:
         if self._notify_sent_date == today:
             return
 
-        if not future:
-            return
-
-        first = future[0]
-        display_type = apply_type_alias(first['type'])
-
-        if first['date'] == today:
-            subject = f'{self._label_today}: {display_type}'
-        elif first['date'] == tomorrow:
-            subject = f'{self._label_tomorrow}: {display_type}'
+        if today_types:
+            subject = f'{self._label_today}: {today_types}'
+        elif tomorrow_types:
+            subject = f'{self._label_tomorrow}: {tomorrow_types}'
         else:
             return
 
+        # Mark as handled first, so a failing notification is not retried
+        # (and logged) every 30 s heartbeat for the rest of the day.
+        self._notify_sent_date = today
         try:
             kwargs = {
                 'Subject':  subject,
@@ -1996,10 +2232,10 @@ class BasePlugin:
             if self._notify_subsystem:
                 kwargs['SubSystem'] = self._notify_subsystem
             Domoticz.SendNotification(**kwargs)
-            self._notify_sent_date = today
             Domoticz.Log(f'[GC] Notificatie verstuurd: {subject}')
         except Exception as exc:
             Domoticz.Error(f'[GC] Notificatie versturen mislukt: {type(exc).__name__}: {exc}')
+        self._save_cache()
 
     def _update_notify_devices(self, future: List[Dict]) -> None:
         now = datetime.datetime.now()
@@ -2007,39 +2243,24 @@ class BasePlugin:
         tomorrow = today + datetime.timedelta(days=1)
         current_minutes = now.hour * 60 + now.minute
 
+        today_types = self._types_on(future, today)
+        tomorrow_types = self._types_on(future, tomorrow)
+
+        # Emoji variant
+        ICON = "<span style='font-size:1.5em;'>&#x267B;&#xFE0F;</span>"
+
         notify_text = ''
+        if today_types and current_minutes < self._today_to_min:
+            notify_text = f"{ICON} <span style='color:white;'>{self._label_today} : </span> {today_types}"
+        elif tomorrow_types and current_minutes >= self._tomorrow_until_min:
+            notify_text = f"{ICON} <span style='color:white;'>{self._label_tomorrow} : </span> {tomorrow_types}"
 
-        if future:
-            today_entry = None
-            tomorrow_entry = None
-
-            for entry in future:
-                entry_date = entry['date']
-
-                if entry_date > tomorrow:
-                    break
-                if today_entry is None and entry_date == today:
-                    today_entry = entry
-                    continue
-                if tomorrow_entry is None and entry_date == tomorrow:
-                    tomorrow_entry = entry
-                    break
-
-            # Emoji variant
-            ICON = "<span style='font-size:1.5em;'>&#x267B;&#xFE0F;</span>"
-
-            if today_entry and current_minutes < self._today_to_min:
-                display_type = apply_type_alias(today_entry['type'])
-                notify_text = f"{ICON} <span style='color:white;'>{self._label_today} : </span> {display_type}"
-            elif tomorrow_entry and current_minutes >= self._tomorrow_until_min:
-                display_type = apply_type_alias(tomorrow_entry['type'])
-                notify_text = f"{ICON} <span style='color:white;'>{self._label_tomorrow} : </span> {display_type}"
         if self.UNIT_NOTIFY not in Devices:
             self._create_notify_device()
         if Devices[self.UNIT_NOTIFY].sValue != notify_text:
             Devices[self.UNIT_NOTIFY].Update(nValue=0, sValue=notify_text)
 
-        self._send_notify_if_needed(future)
+        self._send_notify_if_needed(today_types, tomorrow_types)
 
 
 # --------------------------------------------------------------------------------------------------------------------------------------------------------
