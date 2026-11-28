@@ -5,11 +5,11 @@
 # Retrieves garbage pickup schedules and updates a Domoticz Text device.
 
 """
-<plugin key="GarbageCalendar" name="Garbage Calendar" author="MadPatrick" version="1.3.0"
+<plugin key="GarbageCalendar" name="Garbage Calendar" author="MadPatrick" version="1.4.0"
     externallink="https://github.com/MadPatrick/Domoticz_Garbage">
     <description>
         <h2>Garbage Calendar</h2>
-        <p><strong>Version:</strong> 1.3.0</p>
+        <p><strong>Version:</strong> 1.4.0</p>
         <p>Retrieves your waste collection calendar and displays the upcoming collection dates in a Domoticz text device.</p>
         <h3>Configuration</h3>
         <p>Choose the <strong>Provider</strong> that matches your municipality. The <strong>Extra</strong> field's meaning depends on the selected provider:</p>
@@ -116,9 +116,9 @@ import Domoticz
 import json
 import re
 import os
+import shutil
 import base64
 import hashlib
-import html as _html
 import datetime
 import urllib.request
 import urllib.parse
@@ -132,11 +132,14 @@ from typing import List, Dict, Optional, Callable, Any, Tuple
 
 _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_FILE = os.path.join(_PLUGIN_DIR, 'config.txt')
+# config.txt is the user's own file and not part of the repository, so
+# 'git pull' never touches it. It is created from this example on first start.
+_CONFIG_EXAMPLE_FILE = os.path.join(_PLUGIN_DIR, 'config.example.txt')
 
 _CONFIG_DEFAULTS: Dict[str, str] = {
     'UpdateTime':    '02:30',
     'ShowEvents':    '3',
-    'TodayTime':     '16:00',
+    'TodayTime':     '14:00',
     'TomorrowTime':  '16:00',
     'NotifyTime':      '07:00',
     'NotifyLevel':     '1',
@@ -150,6 +153,12 @@ _CONFIG_DEFAULTS: Dict[str, str] = {
 def _read_config() -> Dict[str, str]:
     """Read config.txt and return key=value mapping (with defaults as fallback)."""
     cfg = dict(_CONFIG_DEFAULTS)
+    if not os.path.isfile(_CONFIG_FILE) and os.path.isfile(_CONFIG_EXAMPLE_FILE):
+        try:
+            shutil.copyfile(_CONFIG_EXAMPLE_FILE, _CONFIG_FILE)
+            Domoticz.Log('[GC] config.txt created from config.example.txt')
+        except OSError as exc:
+            Domoticz.Error(f'[GC] Could not create config.txt from config.example.txt: {exc}')
     try:
         with open(_CONFIG_FILE, 'r', encoding='utf-8') as fh:
             for line in fh:
@@ -183,24 +192,24 @@ def _parse_hhmm_to_min(val: str, default: int) -> int:
 # --------------------------------------------------------------------------------------------
 
 DUTCH_WEEKDAYS_SHORT = ['ma', 'di', 'wo', 'do', 'vr', 'za', 'zo']
-DUTCH_WEEKDAYS_LONG = ['maandag', 'dinsdag', 'woensdag', 'donderdag', 'vrijdag', 'zaterdag', 'zondag']
 DUTCH_MONTHS_SHORT = ['', 'jan', 'feb', 'mrt', 'apr', 'mei', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec']
-DUTCH_MONTHS_LONG = ['', 'januari', 'februari', 'maart', 'april', 'mei', 'juni',
-                     'juli', 'augustus', 'september', 'oktober', 'november', 'december']
 
 # --------------------------------------------------------------------------------------------
 # Waste type aliases
 # --------------------------------------------------------------------------------------------
 
+# First match wins. PMD comes before 'karton', because "Plastic, metaal en
+# drankkartons" (and drink cartons on their own) are PMD, not paper.
 TYPE_ALIASES = [
     ('groente',    'GFT'),
     ('gft',        'GFT'),
+    ('pmd',        'PMD'),
+    ('plastic',    'PMD'),
+    ('drankkarton', 'PMD'),
     ('oud papier', 'Papier'),
     ('papier',     'Papier'),
     ('karton',     'Papier'),
     ('restafval',  'Restafval'),
-    ('pmd',        'PMD'),
-    ('plastic',    'PMD'),
     ('glas',       'Glas'),
     ('textiel',    'Textiel'),
     ('kerstbomen', 'Kerstbomen'),
@@ -244,17 +253,9 @@ def month_from_name(name: str) -> Optional[int]:
     return INPUT_MONTHS.get((name or '').strip().lower().rstrip('.')[:3])
 
 
-def format_date(d: datetime.date, fmt: str) -> str:
-    result = fmt
-    result = result.replace('wdd', DUTCH_WEEKDAYS_LONG[d.weekday()])
-    result = result.replace('wd', DUTCH_WEEKDAYS_SHORT[d.weekday()])
-    result = result.replace('mmmm', DUTCH_MONTHS_LONG[d.month])
-    result = result.replace('mmm', DUTCH_MONTHS_SHORT[d.month])
-    result = result.replace('mm', f'{d.month:02d}')
-    result = result.replace('dd', f'{d.day:02d}')
-    result = result.replace('yyyy', str(d.year))
-    result = result.replace('yy', str(d.year)[-2:])
-    return result
+def format_date(d: datetime.date) -> str:
+    """Short Dutch date for the Calendar device, e.g. 'di 25 nov'."""
+    return f'{DUTCH_WEEKDAYS_SHORT[d.weekday()]} {d.day:02d} {DUTCH_MONTHS_SHORT[d.month]}'
 
 
 def parse_iso_date(s: str) -> Optional[datetime.date]:
@@ -313,9 +314,9 @@ def parse_dutch_date(s: str) -> Optional[datetime.date]:
 
 DEFAULT_HEADERS = {'User-Agent': 'Garbage Calendar-DomoticzPlugin/1.0'}
 
-# Per-request timeout. Kept well below the 10 s x N requests Domoticz is
-# willing to wait for plugin threads on stop (see BasePlugin.onStop).
-HTTP_TIMEOUT_SECS = 15
+# Per-request timeout. Domoticz waits about 10 s for plugin threads on stop,
+# so a request in progress must end within BasePlugin.STOP_JOIN_SECS.
+HTTP_TIMEOUT_SECS = 8
 
 # Set by BasePlugin.onStop so a fetch that is still running skips its
 # remaining requests instead of keeping Domoticz waiting.
@@ -477,7 +478,7 @@ def parse_ical_events(ical: str, today: datetime.date, strip_suffix: str = '') -
         if strip_suffix:
             gtype = re.sub(strip_suffix + '$', '', gtype, flags=re.IGNORECASE).strip()
         if d and d >= today and gtype:
-            results.append({'type': gtype, 'date': d, 'icon_url': ''})
+            results.append({'type': gtype, 'date': d})
     results.sort(key=lambda x: x['date'])
     return results
 
@@ -538,8 +539,8 @@ class GarbageModule:
             pass
 
     @staticmethod
-    def _make_entry(gtype: str, d: datetime.date, icon_url: str = '') -> Dict:
-        return {'type': gtype, 'date': d, 'icon_url': icon_url}
+    def _make_entry(gtype: str, d: datetime.date) -> Dict:
+        return {'type': gtype, 'date': d}
 
     def _fetch_yearly(
         self,
@@ -864,10 +865,10 @@ class OpzetModule(GarbageModule):
         if not bag_id:
             self._error('No bagId found - check Zipcode, Housenr and Hostname')
             return []
-        self._log(f'bagId: {bag_id}')
+        self._debug(f'bagId: {bag_id}')
 
         url = f'https://{hostname}/ical/{bag_id}'
-        self._log(f'GET {url}')
+        self._debug(f'GET {url_for_log(url)}')
         ical = http_get(url)
         if not ical:
             self._error('Empty iCal response')
@@ -897,19 +898,11 @@ class OpzetApiModule(OpzetModule):
 
         raw_types = http_get(f'https://{hostname}/rest/adressen/{bag_id}/afvalstromen')
         type_map: Dict[int, str] = {}
-        icon_map: Dict[int, str] = {}
         if raw_types:
             try:
                 for item in json.loads(raw_types):
                     if isinstance(item, dict):
-                        tid = item.get('id')
-                        type_map[tid] = item.get('title', '')
-                        icon_val = item.get('icon', '') or ''
-                        if icon_val:
-                            if icon_val.startswith('http'):
-                                icon_map[tid] = icon_val
-                            elif icon_val.startswith('/'):
-                                icon_map[tid] = f'https://{hostname}{icon_val}'
+                        type_map[item.get('id')] = item.get('title', '')
             except json.JSONDecodeError:
                 pass
 
@@ -928,10 +921,9 @@ class OpzetApiModule(OpzetModule):
                 if not dstr:
                     continue
                 gtype = type_map.get(type_id, str(type_id) if type_id is not None else '')
-                icon_url = icon_map.get(type_id, '')
                 d = parse_iso_date(dstr)
                 if d and d >= today:
-                    entries.append(self._make_entry(gtype, d, icon_url=icon_url))
+                    entries.append(self._make_entry(gtype, d))
             return entries
 
         return self._fetch_yearly(url_for_year, parse_records, log_fn=self._debug)
@@ -1191,7 +1183,7 @@ class BurgerportaalModule(GarbageModule):
             return []
 
         url2 = f'{self._GCF_BASE}/organisations/{org_id}/address/{address_id}/calendar'
-        self._log(f'GET {url2}')
+        self._debug(f'GET {url_for_log(url2)}')
         raw2 = http_get(url2, headers={'authorization': id_token})
         try:
             cal = json.loads(raw2)
@@ -1759,14 +1751,14 @@ class BasePlugin:
     UNIT_TEXT   = 1  # Garbage Calendar text-device
     UNIT_NOTIFY = 2  # Garbage notification device
     HEARTBEAT_SECS = 30
-    DATE_FMT = 'wd dd mmm'
     # Minimum time between retries of a failing fetch (empty result or
     # exception), so a persistently failing remote site is not hammered
     # every single 30s heartbeat.
     FETCH_RETRY_BACKOFF_SECS = 20 * 60
     # How long onStop waits for a running fetch. Domoticz itself gives up
-    # on plugin threads after ~10 s, so stay below that.
-    STOP_JOIN_SECS = 8
+    # on plugin threads after ~10 s, so stay below that (and above
+    # HTTP_TIMEOUT_SECS, so a request in progress can finish).
+    STOP_JOIN_SECS = 9
 
     def __init__(self):
         self._module: Optional[GarbageModule] = None
@@ -1777,10 +1769,10 @@ class BasePlugin:
         self._show_events = 3
         self._update_hour = 2
         self._update_min = 30
-        self._today_to_min = _parse_hhmm_to_min(_CONFIG_DEFAULTS['TodayTime'], 16 * 60)
-        self._tomorrow_until_min = _parse_hhmm_to_min(_CONFIG_DEFAULTS['TomorrowTime'], 16 * 60)
+        self._today_to_min = 14 * 60
+        self._tomorrow_until_min = 16 * 60
         self._notify_enabled = False
-        self._notify_time_min = _parse_hhmm_to_min(_CONFIG_DEFAULTS['NotifyTime'], 7 * 60)
+        self._notify_time_min = 7 * 60
         self._notify_level = 1
         self._notify_subsystem = ''
         self._notify_sent_date: Optional[datetime.date] = None
@@ -1792,11 +1784,13 @@ class BasePlugin:
         self._lock = threading.Lock()
         self._cache_file = ''
         self._cache_key = ''
+        # Set by the fetch thread; the cache file is written on the main
+        # thread only (onHeartbeat), so two writers never share the tmp file.
+        self._cache_dirty = False
         self.imageID = -1
         self._label_today = _CONFIG_DEFAULTS['LabelToday']
         self._label_tomorrow = _CONFIG_DEFAULTS['LabelTomorrow']
         self._label_nodata = _CONFIG_DEFAULTS['LabelNoData']
-        self.debug = False
 
     def _read_migrated_parameter(self, field, legacy_field, default=""):
         """Read a named setting, falling back to its former ModeX field.
@@ -1820,8 +1814,7 @@ class BasePlugin:
         STOP_EVENT.clear()
         Domoticz.Heartbeat(self.HEARTBEAT_SECS)
 
-        self.debug = self._read_boolean_parameter('EnableDebug', False)
-        if self.debug:
+        if self._read_boolean_parameter('EnableDebug', False):
             Domoticz.Debugging(1)
             Domoticz.Log('Debug logging enabled')
 
@@ -1869,17 +1862,16 @@ class BasePlugin:
         cfg = _read_config()
 
         try:
-            self._show_events = max(1, int(cfg.get('ShowEvents', '3') or '3'))
+            self._show_events = max(1, int(cfg['ShowEvents'] or '3'))
         except ValueError:
             self._show_events = 3
 
-        update_time = cfg.get('UpdateTime', '02:30').strip()
-        update_min = _parse_hhmm_to_min(update_time, 2 * 60 + 30)
+        update_min = _parse_hhmm_to_min(cfg['UpdateTime'], 2 * 60 + 30)
         self._update_hour = update_min // 60
         self._update_min = update_min % 60
 
-        self._today_to_min = _parse_hhmm_to_min(cfg.get('TodayTime', '16:00'), 16 * 60)
-        self._tomorrow_until_min = _parse_hhmm_to_min(cfg.get('TomorrowTime', '16:00'), 16 * 60)
+        self._today_to_min = _parse_hhmm_to_min(cfg['TodayTime'], 14 * 60)
+        self._tomorrow_until_min = _parse_hhmm_to_min(cfg['TomorrowTime'], 16 * 60)
         self._notify_enabled = str(self._read_migrated_parameter('Notification', 'Mode6', 'false')).strip().lower() == 'true'
         if self._notify_enabled and not hasattr(Domoticz, 'SendNotification'):
             Domoticz.Error(
@@ -1887,16 +1879,16 @@ class BasePlugin:
                 'for plugins - notifications are disabled. The Container device still works.'
             )
             self._notify_enabled = False
-        self._notify_time_min = _parse_hhmm_to_min(cfg.get('NotifyTime', '07:00'), 7 * 60)
+        self._notify_time_min = _parse_hhmm_to_min(cfg['NotifyTime'], 7 * 60)
         try:
-            self._notify_level = max(-2, min(2, int(cfg.get('NotifyLevel', '1') or '1')))
+            self._notify_level = max(-2, min(2, int(cfg['NotifyLevel'] or '1')))
         except ValueError:
             self._notify_level = 1
-        self._notify_subsystem = cfg.get('NotifySubSystem', '').strip()
+        self._notify_subsystem = cfg['NotifySubSystem'].strip()
 
-        self._label_today = cfg.get('LabelToday', _CONFIG_DEFAULTS['LabelToday']).strip() or _CONFIG_DEFAULTS['LabelToday']
-        self._label_tomorrow = cfg.get('LabelTomorrow', _CONFIG_DEFAULTS['LabelTomorrow']).strip() or _CONFIG_DEFAULTS['LabelTomorrow']
-        self._label_nodata = cfg.get('LabelNoData', _CONFIG_DEFAULTS['LabelNoData']).strip() or _CONFIG_DEFAULTS['LabelNoData']
+        self._label_today = cfg['LabelToday'] or _CONFIG_DEFAULTS['LabelToday']
+        self._label_tomorrow = cfg['LabelTomorrow'] or _CONFIG_DEFAULTS['LabelTomorrow']
+        self._label_nodata = cfg['LabelNoData'] or _CONFIG_DEFAULTS['LabelNoData']
 
         try:
             # The zip file on disk keeps its historical short name, but the
@@ -1973,6 +1965,10 @@ class BasePlugin:
         with self._lock:
             already_fetched_today = (self._last_fetch_date == today)
             last_failed = self._last_failed_fetch_time
+            cache_dirty = self._cache_dirty
+            self._cache_dirty = False
+        if cache_dirty:
+            self._save_cache()
 
         # Always refresh the devices from the cache: the Today/Tomorrow
         # labels and the notification depend on the clock, not only on new
@@ -2035,8 +2031,7 @@ class BasePlugin:
                 continue
             d = parse_iso_date(str(item.get('date', '')))
             if d:
-                results.append({'type': str(item.get('type', '')), 'date': d,
-                                'icon_url': str(item.get('icon_url', '') or '')})
+                results.append({'type': str(item.get('type', '')), 'date': d})
         results.sort(key=lambda x: x['date'])
         with self._lock:
             self._cached_results = results
@@ -2050,8 +2045,7 @@ class BasePlugin:
             results = list(self._cached_results)
         data = {
             'key': self._cache_key,
-            'results': [{'type': r['type'], 'date': r['date'].isoformat(),
-                         'icon_url': r.get('icon_url', '')} for r in results],
+            'results': [{'type': r['type'], 'date': r['date'].isoformat()} for r in results],
             'notify_sent': self._notify_sent_date.isoformat() if self._notify_sent_date else '',
         }
         tmp = self._cache_file + '.tmp'
@@ -2100,6 +2094,7 @@ class BasePlugin:
                     self._cached_results = results
                     self._last_fetch_date = datetime.date.today()
                     self._last_failed_fetch_time = None
+                    self._cache_dirty = True
                 else:
                     # An empty result can't be distinguished here from a
                     # silently-swallowed HTTP/parse failure inside the
@@ -2109,7 +2104,6 @@ class BasePlugin:
                     # was cached previously.
                     self._last_failed_fetch_time = datetime.datetime.now()
             if results:
-                self._save_cache()
                 Domoticz.Log(f'Fetch complete: {len(results)} upcoming event(s) found')
             else:
                 Domoticz.Error(
@@ -2150,35 +2144,47 @@ class BasePlugin:
                 elif r['date'] == tomorrow:
                     date_str = self._label_tomorrow
                 else:
-                    date_str = format_date(r['date'], self.DATE_FMT)
+                    date_str = format_date(r['date'])
                 display_type = apply_type_alias(r['type'])
-                icon_url = r.get('icon_url', '')
 
-                # Fixed-width date so that the second column aligns to every line
+                # Calendar icon on the left; date and waste type on the right.
+                icon_part = "<span>&#128197;</span>"
                 date_cell = (
-                    "&#128197;&nbsp;"
-                    "<span style='display:inline-block;min-width:95px;"
-                    "color:#969696;font-weight:bold;'>"
+                    "<span style='color:#969696;font-weight:bold;'>"
                     f"{date_str}"
                     "</span>"
                 )
 
-                if icon_url:
-                    safe_url = _html.escape(icon_url, quote=True)
-                    icon_cell = (
-                        f'<img src="{safe_url}" '
-                        f'style="height:12px;vertical-align:middle;margin-right:4px;">'
-                        f"{display_type}"
-                    )
-                else:
-                    icon_cell = WASTE_ICONS.get(
-                        display_type,
-                        f"<span style='color:#999;'>{display_type}</span>"
-                    )
+                # Coloured label only: the Domoticz dashboard strips <img>
+                # tags from a Text device, so provider icons can't be shown.
+                icon_cell = WASTE_ICONS.get(
+                    display_type,
+                    f"<span style='color:#999;'>{display_type}</span>"
+                )
 
-                lines.append(f"{date_cell}{icon_cell}")
+                # One row per pickup: icon pinned left, text pinned right.
+                # The waste type gets a fixed-width column so the dates line up.
+                lines.append(
+                    "<div style='display:flex;align-items:center;"
+                    "justify-content:space-between;white-space:nowrap;'>"
+                    f"{icon_part}"
+                    "<span>"
+                    f"{date_cell}"
+                    "<span style='display:inline-block;min-width:5.5em;"
+                    f"text-align:right;'>{icon_cell}</span>"
+                    "</span>"
+                    "</div>"
+                )
 
-            text = '<br>'.join(lines)
+            # One block for the whole list. It fills the right-aligned value
+            # cell of the mobile dashboard, so the icon really sits on the left.
+            # overflow:hidden keeps it next to the floated device image on the
+            # Devices page instead of letting the last lines slide under it.
+            text = (
+                "<div style='display:block;overflow:hidden;line-height:1.5;'>"
+                + ''.join(lines)
+                + "</div>"
+            )
 
         if self.UNIT_TEXT not in Devices:
             self._create_text_device()
@@ -2270,13 +2276,10 @@ class BasePlugin:
 _plugin = BasePlugin()
 
 def onStart():
-    global _plugin
     _plugin.onStart()
 
 def onStop():
-    global _plugin
     _plugin.onStop()
 
 def onHeartbeat():
-    global _plugin
     _plugin.onHeartbeat()
