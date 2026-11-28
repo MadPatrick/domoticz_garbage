@@ -138,7 +138,7 @@ Pickup dates are always displayed in the format **`wd dd mmm`** (e.g. `ma 07 apr
 | 8 | recycleapp-be | RecycleApp REST API | 🇧🇪 BE |
 | 9 | omrin | Omrin API (requires `cryptography`) | 🇳🇱 NL |
 | 10 | burgerportaal | Firebase-based portal | 🇳🇱 NL |
-| 11 | rmn | RMN via burgerportaal (kept for existing setups; for new ones use 10 with `rmn`) | 🇳🇱 NL |
+| 11 | rmn | Same as 10 with BPName `rmn` (kept so existing setups keep working) | 🇳🇱 NL |
 | 12 | deafvalapp | De Afval App | 🇳🇱 NL |
 | 13 | zuidlimburg | ZuidLimburg HTML scraping | 🇳🇱 NL |
 | 14 | montferland | Montferland REST API | 🇳🇱 NL |

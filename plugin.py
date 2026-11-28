@@ -74,7 +74,7 @@
                 <option label="8 - recycleapp-be (BE)" value="8" />
                 <option label="9 - omrin *" value="9" />
                 <option label="10 - burgerportaal" value="10" />
-                <option label="11 - rmn" value="11" />
+                <option label="11 - rmn (= 10 with rmn)" value="11" />
                 <option label="12 - deafvalapp" value="12" />
                 <option label="13 - zuidlimburg" value="13" />
                 <option label="14 - montferland" value="14" />
@@ -1266,21 +1266,11 @@ class BurgerportaalModule(GarbageModule):
 
 
 # --------------------------------------------------------------------------------------------
-# Module 11: m_rmn
+# Module 11: rmn (alias)
 # --------------------------------------------------------------------------------------------
 
-class RmnModule(BurgerportaalModule):
-    name = 'RMN'
-    # Same organisation as Burgerportaal with BPName "rmn"; kept as its own
-    # provider (and token file) so existing configurations keep working.
-    _RMN_ORG_ID = BurgerportaalModule._BP_CODES['rmn']
-
-    def __init__(self, token_file: Optional[str] = None):
-        _plugin_dir = os.path.dirname(os.path.abspath(__file__))
-        self._token_file = token_file or os.path.join(_plugin_dir, 'gc_rmn_token.txt')
-
-    def fetch(self, zipcode, housenr, housenrsuf, extra):
-        return self._fetch_for_org(zipcode, housenr, housenrsuf, self._RMN_ORG_ID)
+# Provider 11 is the same as Burgerportaal (10) with BPName "rmn". It stays
+# selectable for existing hardware, but BasePlugin.onStart maps it to 10.
 
 
 # --------------------------------------------------------------------------------------------
@@ -1733,7 +1723,6 @@ MODULES: Dict[str, GarbageModule] = {
     '8':  RecycleAppBeModule(),
     '9':  OmrinModule(),
     '10': BurgerportaalModule(),
-    '11': RmnModule(),
     '12': DeAfvalAppModule(),
     '13': ZuidLimburgModule(),
     '14': MontferlandModule(),
@@ -1792,19 +1781,13 @@ class BasePlugin:
         self._label_tomorrow = _CONFIG_DEFAULTS['LabelTomorrow']
         self._label_nodata = _CONFIG_DEFAULTS['LabelNoData']
 
-    def _read_migrated_parameter(self, field, legacy_field, default=""):
-        """Read a named setting, falling back to its former ModeX field.
-
-        Empty defaults on the new settings make existing Domoticz hardware
-        configurations continue to work until they are saved with the new
-        field names.
-        """
-        raw = Parameters.get(field, "")
-        if raw is None or str(raw).strip() == "":
-            raw = Parameters.get(legacy_field, "")
-        if raw is None or str(raw).strip() == "":
+    @staticmethod
+    def _param(field, default=''):
+        """A hardware setting, or *default* when it is empty."""
+        raw = Parameters.get(field, '')
+        if raw is None or str(raw).strip() == '':
             return default
-        return raw
+        return str(raw).strip()
 
     def _read_boolean_parameter(self, field, default=False):
         raw = Parameters.get(field, "true" if default else "false")
@@ -1818,36 +1801,15 @@ class BasePlugin:
             Domoticz.Debugging(1)
             Domoticz.Log('Debug logging enabled')
 
-        # Existing hardware entries configured before this plugin switched to
-        # the named Extended Settings fields still work via the ModeX
-        # fallback below, but the new fields themselves stay empty in the
-        # hardware edit screen until someone fills them in there. Warn once
-        # per start so that isn't a silent trap - re-entering the values
-        # into the new fields (then saving) finishes the move.
-        legacy_in_use = {
-            'Provider': (Parameters.get('Provider', ''), Parameters.get('Mode1', '')),
-            'Zipcode': (Parameters.get('Zipcode', ''), Parameters.get('Mode2', '')),
-            'HouseNumber': (Parameters.get('HouseNumber', ''), Parameters.get('Mode3', '')),
-            'Suffix': (Parameters.get('Suffix', ''), Parameters.get('Mode4', '')),
-            'Extra': (Parameters.get('ExtraValue', ''), Parameters.get('Mode5', '')),
-            'Notification': (Parameters.get('Notification', ''), Parameters.get('Mode6', '')),
-        }
-        fields_on_fallback = [
-            name for name, (new_val, old_val) in legacy_in_use.items()
-            if not str(new_val).strip() and str(old_val).strip()
-        ]
-        if fields_on_fallback:
-            Domoticz.Log(
-                'Still using legacy Mode1-6 values for: ' + ', '.join(fields_on_fallback) + '. '
-                'Open this hardware\'s settings, copy those values into the new fields with the '
-                'same names, and save once to finish moving to the new settings layout.'
-            )
-
-        module_key = str(self._read_migrated_parameter('Provider', 'Mode1', '2')).strip()
-        self._zipcode = str(self._read_migrated_parameter('Zipcode', 'Mode2', '')).strip()
-        self._housenr = str(self._read_migrated_parameter('HouseNumber', 'Mode3', '')).strip()
-        self._housenrsuf = str(self._read_migrated_parameter('Suffix', 'Mode4', '')).strip()
-        self._extra = str(self._read_migrated_parameter('ExtraValue', 'Mode5', '')).strip()
+        module_key = self._param('Provider', '2')
+        self._zipcode = self._param('Zipcode')
+        self._housenr = self._param('HouseNumber')
+        self._housenrsuf = self._param('Suffix')
+        self._extra = self._param('ExtraValue')
+        if module_key == '11':
+            # Former separate "rmn" provider: Burgerportaal with BPName rmn.
+            module_key, self._extra = '10', 'rmn'
+            Domoticz.Log('Provider 11 (rmn) is handled as 10 (burgerportaal) with BPName "rmn".')
 
         # Mask this instance's address everywhere it could end up in the log.
         set_log_redact_values(
@@ -1872,7 +1834,7 @@ class BasePlugin:
 
         self._today_to_min = _parse_hhmm_to_min(cfg['TodayTime'], 14 * 60)
         self._tomorrow_until_min = _parse_hhmm_to_min(cfg['TomorrowTime'], 16 * 60)
-        self._notify_enabled = str(self._read_migrated_parameter('Notification', 'Mode6', 'false')).strip().lower() == 'true'
+        self._notify_enabled = self._param('Notification', 'false').lower() == 'true'
         if self._notify_enabled and not hasattr(Domoticz, 'SendNotification'):
             Domoticz.Error(
                 'Notification is enabled, but this Domoticz version has no Domoticz.SendNotification() '

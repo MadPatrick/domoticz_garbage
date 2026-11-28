@@ -119,6 +119,26 @@ class StartAndDevicesTest(PluginTestCase):
         self.assertEqual(self.p._cached_results, [{"type": "GFT", "date": TODAY}])
 
 
+class ProviderSettingsTest(PluginTestCase):
+
+    def test_provider_11_is_burgerportaal_with_rmn(self):
+        calls = []
+        self.plugin.MODULES['10'].fetch = lambda *args: calls.append(args) or []
+        builtins.Parameters.update({"Provider": "11", "ExtraValue": ""})
+        self.plugin.onStart()
+        self.p._thread.join(5)
+        self.assertIs(self.p._module, self.plugin.MODULES['10'])
+        self.assertEqual(calls, [("1234AB", "5", "", "rmn")])
+
+    def test_old_mode_fields_are_not_used_any_more(self):
+        builtins.Parameters = {"Provider": "15", "ExtraValue": self.csv, "Mode2": "9999ZZ",
+                               "Mode3": "1", "HardwareID": "3"}
+        self.plugin.onStart()
+        self.p._thread.join(5)
+        self.assertEqual(self.p._zipcode, "")
+        self.assertEqual(self.p._housenr, "")
+
+
 class ContainerAndNotificationTest(PluginTestCase):
 
     def test_two_types_tomorrow_are_combined(self):
@@ -218,7 +238,9 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(result, [{"type": "GFT", "date": TODAY + datetime.timedelta(days=2)}])
 
     def test_every_provider_is_registered(self):
-        self.assertEqual(sorted(self.m.MODULES, key=int), [str(i) for i in range(1, 19)])
+        # 11 (rmn) is an alias of 10, handled in onStart.
+        expected = [str(i) for i in range(1, 19) if i != 11]
+        self.assertEqual(sorted(self.m.MODULES, key=int), expected)
 
 
 if __name__ == "__main__":
