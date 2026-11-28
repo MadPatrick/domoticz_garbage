@@ -5,11 +5,11 @@
 # Retrieves garbage pickup schedules and updates a Domoticz Text device.
 
 """
-<plugin key="GarbageCalendar" name="Garbage Calendar" author="MadPatrick" version="1.3.0"
+<plugin key="GarbageCalendar" name="Garbage Calendar" author="MadPatrick" version="1.3.1"
     externallink="https://github.com/MadPatrick/Domoticz_Garbage">
     <description>
         <h2>Garbage Calendar</h2>
-        <p><strong>Version:</strong> 1.3.0</p>
+        <p><strong>Version:</strong> 1.3.1</p>
         <p>Retrieves your waste collection calendar and displays the upcoming collection dates in a Domoticz text device.</p>
         <h3>Configuration</h3>
         <p>Choose the <strong>Provider</strong> that matches your municipality. The <strong>Extra</strong> field's meaning depends on the selected provider:</p>
@@ -2154,12 +2154,12 @@ class BasePlugin:
                 display_type = apply_type_alias(r['type'])
                 icon_url = r.get('icon_url', '')
 
-                # Fixed-width date so that the second column aligns to every line
+                # Fixed-width date (in em, so it scales with the font size)
+                # so that the second column aligns on every line.
                 date_cell = (
-                    "&#128197;&nbsp;"
-                    "<span style='display:inline-block;min-width:95px;"
+                    "<span style='display:inline-block;min-width:7.5em;"
                     "color:#969696;font-weight:bold;'>"
-                    f"{date_str}"
+                    f"&#128197;&nbsp;{date_str}"
                     "</span>"
                 )
 
@@ -2176,9 +2176,21 @@ class BasePlugin:
                         f"<span style='color:#999;'>{display_type}</span>"
                     )
 
-                lines.append(f"{date_cell}{icon_cell}")
+                # One block per pickup that never wraps, so the date and the
+                # waste type stay on the same line on a narrow (phone) screen.
+                lines.append(
+                    f"<div style='white-space:nowrap;'>{date_cell}{icon_cell}</div>"
+                )
 
-            text = '<br>'.join(lines)
+            # Left-aligned block that shrinks to its content. The Domoticz
+            # mobile dashboard right-aligns the value cell, which otherwise
+            # leaves every line with a different starting position.
+            text = (
+                "<div style='display:inline-block;text-align:left;"
+                "line-height:1.5;vertical-align:top;'>"
+                + ''.join(lines)
+                + "</div>"
+            )
 
         if self.UNIT_TEXT not in Devices:
             self._create_text_device()
