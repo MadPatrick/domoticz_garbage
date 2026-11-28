@@ -2154,12 +2154,11 @@ class BasePlugin:
                 display_type = apply_type_alias(r['type'])
                 icon_url = r.get('icon_url', '')
 
-                # Fixed-width date (in em, so it scales with the font size)
-                # so that the second column aligns on every line.
+                # Calendar icon on the left; date and waste type on the right.
+                icon_part = "<span>&#128197;</span>"
                 date_cell = (
-                    "<span style='display:inline-block;min-width:7.5em;"
-                    "color:#969696;font-weight:bold;'>"
-                    f"&#128197;&nbsp;{date_str}"
+                    "<span style='color:#969696;font-weight:bold;'>"
+                    f"{date_str}"
                     "</span>"
                 )
 
@@ -2176,18 +2175,24 @@ class BasePlugin:
                         f"<span style='color:#999;'>{display_type}</span>"
                     )
 
-                # One block per pickup that never wraps, so the date and the
-                # waste type stay on the same line on a narrow (phone) screen.
+                # One row per pickup: icon pinned left, text pinned right.
+                # The waste type gets a fixed-width column so the dates line up.
                 lines.append(
-                    f"<div style='white-space:nowrap;'>{date_cell}{icon_cell}</div>"
+                    "<div style='display:flex;align-items:center;"
+                    "justify-content:space-between;white-space:nowrap;'>"
+                    f"{icon_part}"
+                    "<span>"
+                    f"{date_cell}"
+                    "<span style='display:inline-block;min-width:5.5em;"
+                    f"text-align:right;'>{icon_cell}</span>"
+                    "</span>"
+                    "</div>"
                 )
 
-            # Left-aligned block that shrinks to its content. The Domoticz
-            # mobile dashboard right-aligns the value cell, which otherwise
-            # leaves every line with a different starting position.
+            # Full-width block, so the icon really sits on the left edge even
+            # in the right-aligned value cell of the Domoticz mobile dashboard.
             text = (
-                "<div style='display:inline-block;text-align:left;"
-                "line-height:1.5;vertical-align:top;'>"
+                "<div style='display:block;width:100%;line-height:1.5;'>"
                 + ''.join(lines)
                 + "</div>"
             )
