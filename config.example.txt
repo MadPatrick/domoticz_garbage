@@ -1,4 +1,5 @@
-# GarbageCalendar - configuration file
+# GarbageCalendar - example configuration file
+# On the first start the plugin copies this file to config.txt; edit config.txt, not this file.
 # Adjust the values below as desired and save.
 # The plugin reads this file at every restart.
 

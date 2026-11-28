@@ -37,14 +37,13 @@ https://forum.domoticz.com/viewtopic.php?t=31295**
 
 ## Installation
 
-1. Create the plugin directory inside your Domoticz installation:
+1. Clone the repository into the plugins directory of your Domoticz installation:
    ```bash
-   mkdir -p <domoticz>/plugins/GarbageCalendar
+   cd <domoticz>/plugins
+   git clone https://github.com/MadPatrick/domoticz_garbage GarbageCalendar
    ```
-2. Copy `plugin.py` (and optionally `config.txt`) into that directory:
-   ```bash
-   cp plugin.py config.txt <domoticz>/plugins/GarbageCalendar/
-   ```
+   Without git, copy `plugin.py`, `Garbage.zip` (the icons) and `config.example.txt` into `<domoticz>/plugins/GarbageCalendar/`.
+2. Update later with `git pull` in that directory. Your settings in `config.txt` are not part of the repository, so they are kept.
 3. Restart Domoticz:
    ```bash
    sudo systemctl restart domoticz
@@ -81,14 +80,20 @@ These parameters are set in the Domoticz hardware setup UI:
 
 ### config.txt settings
 
-Advanced settings are configured by editing `config.txt` in the plugin directory.  
+Advanced settings are configured by editing `config.txt` in the plugin directory. On the first start the plugin creates it from `config.example.txt`.
+
+> **Updating from 1.3.x:** `config.txt` used to be in the repository. If you changed it, `git pull` stops with *"local changes would be overwritten"*. Keep your settings like this:
+> ```bash
+> cp config.txt config.txt.bak && git checkout config.txt && git pull && mv config.txt.bak config.txt
+> ```
+
 The plugin re-reads this file on every restart (no Domoticz restart required — just restart the plugin via **Setup → Hardware**).
 
 | Key | Description | Default |
 |---|---|---|
 | `UpdateTime` | Time of day to refresh the schedule (HH:MM) | `02:30` |
 | `ShowEvents` | Number of upcoming pickups to display | `3` |
-| `TodayTime` | Until what time the "Today" label is shown (HH:MM) | `16:00` (the supplied `config.txt` uses `14:00`) |
+| `TodayTime` | Until what time the "Today" label is shown (HH:MM) | `14:00` |
 | `TomorrowTime` | From what time the "Tomorrow" label is shown (HH:MM) | `16:00` |
 | `NotifyTime` | Time at which the notification is sent on the pickup day or the day before (HH:MM) | `07:00` |
 | `NotifyLevel` | Priority of the notification (`-2`=very low … `2`=emergency) | `1` |
@@ -133,7 +138,7 @@ Pickup dates are always displayed in the format **`wd dd mmm`** (e.g. `ma 07 apr
 | 8 | recycleapp-be | RecycleApp REST API | 🇧🇪 BE |
 | 9 | omrin | Omrin API (requires `cryptography`) | 🇳🇱 NL |
 | 10 | burgerportaal | Firebase-based portal | 🇳🇱 NL |
-| 11 | rmn | RMN via burgerportaal | 🇳🇱 NL |
+| 11 | rmn | Same as 10 with BPName `rmn` (kept so existing setups keep working) | 🇳🇱 NL |
 | 12 | deafvalapp | De Afval App | 🇳🇱 NL |
 | 13 | zuidlimburg | ZuidLimburg HTML scraping | 🇳🇱 NL |
 | 14 | montferland | Montferland REST API | 🇳🇱 NL |
@@ -198,3 +203,15 @@ The notification is sent only once per day (also across plugin restarts). It nee
 | ximmio returns no data | Find the correct `companyCode` for your municipality (see [Module-specific notes](#module-specific-notes)). |
 | "Container" device not updating | Check `TodayTime` and `TomorrowTime` in `config.txt`; restart the plugin after saving. |
 | No e-mail / push notification received | Enable notifications via the **Notification** dropdown in the hardware panel and verify `NotifyTime` in `config.txt`. Also check that notification channels are configured under **Setup → Settings → Notifications** in Domoticz. |
+
+---
+
+## Tests
+
+The tests run the plugin against a fake Domoticz module, so no Domoticz or internet connection is needed:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+They also run on GitHub for every pull request.
