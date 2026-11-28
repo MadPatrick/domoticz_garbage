@@ -2189,10 +2189,12 @@ class BasePlugin:
                     "</div>"
                 )
 
-            # Full-width block, so the icon really sits on the left edge even
-            # in the right-aligned value cell of the Domoticz mobile dashboard.
+            # One block for the whole list. It fills the right-aligned value
+            # cell of the mobile dashboard, so the icon really sits on the left.
+            # overflow:hidden keeps it next to the floated device image on the
+            # Devices page instead of letting the last lines slide under it.
             text = (
-                "<div style='display:block;width:100%;line-height:1.5;'>"
+                "<div style='display:block;overflow:hidden;line-height:1.5;'>"
                 + ''.join(lines)
                 + "</div>"
             )
